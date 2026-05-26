@@ -1,0 +1,57 @@
+generator client {
+  provider        = "prisma-client-js"
+  previewFeatures = ["driverAdapters"]
+}
+
+datasource db {
+  provider = "sqlite"
+}
+
+model Job {
+  id        String   @id @default(cuid())
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  // Source info
+  platform  String @default("BILIBILI")
+  bvid      String @unique
+  sourceUrl String
+
+  // Original metadata
+  title       String
+  description String @default("")
+  thumbnail   String @default("")
+  duration    Int    @default(0)
+  viewCount   Int    @default(0)
+  likeCount   Int    @default(0)
+  authorName  String @default("")
+  authorId    String @default("")
+  publishedAt String @default("")
+
+  // Pipeline status: DISCOVERED → DOWNLOADING → DOWNLOADED → TRANSCRIBING
+  //   → TRANSCRIBED → TRANSLATING → TRANSLATED → DUBBING
+  //   → REVIEW_PENDING → PUBLISHING → PUBLISHED | FAILED
+  status   String @default("DISCOVERED")
+  errorMsg String @default("")
+
+  // Processing artifacts
+  localVideoPath     String @default("")
+  processedVideoPath String @default("")
+
+  // Transcription (Chinese)
+  transcript String @default("")
+
+  // Translation — editable in review
+  targetLanguage  String @default("EN")
+  translatedTitle String @default("")
+  translatedDesc  String @default("")
+  subtitles       String @default("[]") // JSON [{start,end,text}]
+  tags            String @default("[]") // JSON string[]
+
+  // Publish result
+  youtubeVideoId     String    @default("")
+  youtubeUrl         String    @default("")
+  publishedYoutubeAt DateTime?
+
+  @@index([status])
+}
