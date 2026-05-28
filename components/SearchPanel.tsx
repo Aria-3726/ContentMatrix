@@ -8,15 +8,15 @@ interface SearchPanelProps {
 }
 
 const PRESET_KEYWORDS = [
-  "pocomo",
-  "pocomo攻略",
-  "pocomo新手",
-  "pocomo宠物",
-  "pocomo活动",
+  "洛克王国",
+  "洛克王国攻略",
+  "洛克王国新手",
+  "洛克王国宠物",
+  "洛克王国活动",
 ];
 
 export function SearchPanel({ onSearch, isLoading }: SearchPanelProps) {
-  const [keyword, setKeyword] = useState("pocomo");
+  const [keyword, setKeyword] = useState("洛克王国");
   const [minViews, setMinViews] = useState(5000);
 
   const handleSubmit = (e: React.FormEvent) => {
