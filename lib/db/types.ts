@@ -20,16 +20,19 @@ export interface SubtitleSegment {
   text: string;
 }
 
-export interface BilibiliSearchResult {
-  bvid: string;
+/** Platform-agnostic search result returned by all scrapers */
+export interface ScraperResult {
+  platform: string;       // BILIBILI | DOUYIN | XIAOHONGSHU
+  sourceId: string;       // Platform-specific ID (bvid, aweme_id, note_id)
+  sourceType: string;     // VIDEO | IMAGE_NOTE
+  sourceUrl: string;
   title: string;
   description: string;
   thumbnail: string;
-  duration: number; // seconds
+  duration: number;       // seconds (0 for image notes)
   viewCount: number;
   likeCount: number;
   authorName: string;
   authorId: string;
   publishedAt: string;
-  sourceUrl: string;
 }

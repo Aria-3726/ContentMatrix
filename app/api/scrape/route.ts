@@ -1,18 +1,21 @@
 /**
  * POST /api/scrape
- * Search Bilibili and return results + auto-create Job records for new ones.
+ * Search content platforms and auto-create Job records for new results.
  *
- * Body: { keyword: string, page?: number, minViews?: number }
+ * Body: { platform?: "BILIBILI"|"DOUYIN"|"XIAOHONGSHU", keyword: string, page?: number, minViews?: number }
  */
 
 import { NextRequest, NextResponse } from "next/server";
 import { searchBilibili } from "@/lib/scraper/bilibili";
+import { searchDouyin } from "@/lib/scraper/douyin";
+import { searchXiaohongshu } from "@/lib/scraper/xiaohongshu";
 import { prisma } from "@/lib/db/client";
 
 export async function POST(req: NextRequest) {
   try {
     const body = await req.json();
-    const { keyword, page = 1, minViews = 5000 } = body as {
+    const { platform = "BILIBILI", keyword, page = 1, minViews = 5000 } = body as {
+      platform?: string;
       keyword?: string;
       page?: number;
       minViews?: number;
@@ -25,21 +28,39 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    const results = await searchBilibili({ keyword, page, minViews });
+    // Dispatch to platform-specific scraper
+    let results;
+    switch (platform) {
+      case "BILIBILI":
+        results = await searchBilibili({ keyword, page, minViews });
+        break;
+      case "DOUYIN":
+        results = await searchDouyin({ keyword, page, minViews });
+        break;
+      case "XIAOHONGSHU":
+        results = await searchXiaohongshu({ keyword, page, minLikes: minViews });
+        break;
+      default:
+        return NextResponse.json({ error: `Unsupported platform: ${platform}` }, { status: 400 });
+    }
 
-    // Upsert into DB — skip if bvid already exists
+    // Upsert into DB — skip if platform+sourceId already exists
     const created: string[] = [];
     const existing: string[] = [];
 
     for (const r of results) {
-      const exists = await prisma.job.findUnique({ where: { bvid: r.bvid } });
+      const exists = await prisma.job.findFirst({
+        where: { platform: r.platform ?? platform, sourceId: r.sourceId },
+      });
       if (exists) {
-        existing.push(r.bvid);
+        existing.push(r.sourceId);
         continue;
       }
       await prisma.job.create({
         data: {
-          bvid: r.bvid,
+          platform: r.platform ?? platform,
+          sourceId: r.sourceId,
+          sourceType: r.sourceType ?? "VIDEO",
           sourceUrl: r.sourceUrl,
           title: r.title,
           description: r.description,
@@ -53,7 +74,7 @@ export async function POST(req: NextRequest) {
           status: "DISCOVERED",
         },
       });
-      created.push(r.bvid);
+      created.push(r.sourceId);
     }
 
     return NextResponse.json({

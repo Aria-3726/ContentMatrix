@@ -34,13 +34,13 @@ export default function Dashboard() {
     };
   }, [fetchJobs]);
 
-  const handleSearch = async (keyword: string, minViews: number) => {
+  const handleSearch = async (keyword: string, minViews: number, platform: string = "BILIBILI") => {
     setSearchLoading(true);
     try {
       const res = await fetch("/api/scrape", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ keyword, minViews }),
+        body: JSON.stringify({ keyword, minViews, platform }),
       });
       const data = await res.json() as { created: number; existing: number; error?: string };
       if (!res.ok) throw new Error(data.error ?? "搜索失败");
@@ -114,7 +114,7 @@ export default function Dashboard() {
             <p className="text-4xl mb-3">📭</p>
             <p className="text-sm">
               {jobs.length === 0
-                ? "搜索关键词来发现 B 站内容"
+                ? "搜索关键词来发现内容"
                 : "该状态下没有任务"}
             </p>
           </div>

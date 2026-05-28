@@ -40,7 +40,7 @@ export async function GET(
     const stream = fs.createReadStream(videoPath, { start, end });
     const readable = new ReadableStream({
       start(controller) {
-        stream.on("data", (chunk: Buffer) => controller.enqueue(chunk));
+        stream.on("data", (chunk: Buffer | string) => controller.enqueue(chunk));
         stream.on("end", () => controller.close());
         stream.on("error", (err) => controller.error(err));
       },
@@ -64,7 +64,7 @@ export async function GET(
   const stream = fs.createReadStream(videoPath);
   const readable = new ReadableStream({
     start(controller) {
-      stream.on("data", (chunk: Buffer) => controller.enqueue(chunk));
+      stream.on("data", (chunk: Buffer | string) => controller.enqueue(chunk));
       stream.on("end", () => controller.close());
       stream.on("error", (err) => controller.error(err));
     },

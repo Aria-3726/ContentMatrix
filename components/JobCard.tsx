@@ -4,7 +4,9 @@ import { StatusBadge } from "./StatusBadge";
 
 export interface JobSummary {
   id: string;
-  bvid: string;
+  platform: string;
+  sourceId: string;
+  sourceType: string;
   title: string;
   thumbnail: string;
   duration: number;
@@ -38,7 +40,7 @@ function fmtNum(n: number) {
 }
 
 const NEXT_ACTIONS: Record<string, { label: string; action: string; color: string }> = {
-  DISCOVERED:   { label: "下载视频", action: "download",   color: "bg-blue-600 hover:bg-blue-700" },
+  DISCOVERED:   { label: "下载", action: "download",   color: "bg-blue-600 hover:bg-blue-700" },
   DOWNLOADED:   { label: "开始转录", action: "transcribe", color: "bg-indigo-600 hover:bg-indigo-700" },
   TRANSCRIBED:  { label: "开始翻译", action: "translate",  color: "bg-amber-600 hover:bg-amber-700" },
   TRANSLATED:   { label: "AI 配音",  action: "dub",        color: "bg-fuchsia-600 hover:bg-fuchsia-700" },
@@ -137,9 +139,9 @@ export function JobCard({ job, onAction, isLoading }: JobCardProps) {
             target="_blank"
             rel="noopener noreferrer"
             className="px-2 py-1.5 text-sm text-gray-500 hover:text-gray-700 bg-gray-50 hover:bg-gray-100 rounded-lg transition-colors"
-            title="查看原视频"
+            title={`查看原视频 (${job.platform})`}
           >
-            B
+            {job.platform === "BILIBILI" ? "B" : job.platform === "DOUYIN" ? "D" : job.platform === "XIAOHONGSHU" ? "X" : "🔗"}
           </a>
         </div>
       </div>

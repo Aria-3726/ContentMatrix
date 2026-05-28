@@ -2,31 +2,66 @@
 
 import { useState } from "react";
 
+type Platform = "BILIBILI" | "DOUYIN" | "XIAOHONGSHU";
+
 interface SearchPanelProps {
-  onSearch: (keyword: string, minViews: number) => void;
+  onSearch: (keyword: string, minViews: number, platform: Platform) => void;
   isLoading: boolean;
 }
 
-const PRESET_KEYWORDS = [
-  "洛克王国",
-  "洛克王国攻略",
-  "洛克王国新手",
-  "洛克王国宠物",
-  "洛克王国活动",
-];
+const PLATFORM_CONFIG: Record<Platform, { label: string; icon: string; presets: string[] }> = {
+  BILIBILI: {
+    label: "B站",
+    icon: "📺",
+    presets: ["洛克王国", "洛克王国攻略", "洛克王国新手", "洛克王国宠物", "洛克王国活动"],
+  },
+  DOUYIN: {
+    label: "抖音",
+    icon: "🎵",
+    presets: ["洛克王国", "洛克王国攻略", "游戏攻略", "洛克王国新手"],
+  },
+  XIAOHONGSHU: {
+    label: "小红书",
+    icon: "📕",
+    presets: ["洛克王国", "洛克王国攻略", "洛克王国宠物", "游戏推荐"],
+  },
+};
 
 export function SearchPanel({ onSearch, isLoading }: SearchPanelProps) {
+  const [platform, setPlatform] = useState<Platform>("BILIBILI");
   const [keyword, setKeyword] = useState("洛克王国");
   const [minViews, setMinViews] = useState(5000);
 
+  const cfg = PLATFORM_CONFIG[platform];
+
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
-    if (keyword.trim()) onSearch(keyword.trim(), minViews);
+    if (keyword.trim()) onSearch(keyword.trim(), minViews, platform);
   };
 
   return (
     <div className="bg-white border border-gray-200 rounded-xl p-4 mb-6">
-      <h2 className="font-semibold text-gray-800 mb-3">🔍 B站内容采集</h2>
+      <h2 className="font-semibold text-gray-800 mb-3">
+        {cfg.icon} {cfg.label}内容采集
+      </h2>
+
+      {/* Platform tabs */}
+      <div className="flex gap-1 mb-3 bg-gray-100 rounded-lg p-1 w-fit">
+        {(Object.keys(PLATFORM_CONFIG) as Platform[]).map((p) => (
+          <button
+            key={p}
+            onClick={() => setPlatform(p)}
+            className={`px-3 py-1.5 text-xs font-medium rounded-md transition-colors ${
+              platform === p
+                ? "bg-white text-gray-900 shadow-sm"
+                : "text-gray-500 hover:text-gray-700"
+            }`}
+          >
+            {PLATFORM_CONFIG[p].icon} {PLATFORM_CONFIG[p].label}
+          </button>
+        ))}
+      </div>
+
       <form onSubmit={handleSubmit} className="flex gap-2 flex-wrap">
         <input
           type="text"
@@ -62,12 +97,12 @@ export function SearchPanel({ onSearch, isLoading }: SearchPanelProps) {
 
       {/* Quick presets */}
       <div className="flex flex-wrap gap-2 mt-3">
-        {PRESET_KEYWORDS.map((kw) => (
+        {cfg.presets.map((kw) => (
           <button
             key={kw}
             onClick={() => {
               setKeyword(kw);
-              onSearch(kw, minViews);
+              onSearch(kw, minViews, platform);
             }}
             className="text-xs px-2 py-1 rounded-full bg-gray-100 hover:bg-gray-200 text-gray-600 transition-colors"
           >

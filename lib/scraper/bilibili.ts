@@ -10,7 +10,7 @@ import { promisify } from "util";
 import fs from "fs";
 import os from "os";
 import path from "path";
-import type { BilibiliSearchResult } from "@/lib/db/types";
+import type { ScraperResult } from "@/lib/db/types";
 
 const execFileAsync = promisify(execFile);
 
@@ -74,7 +74,7 @@ export function writeCookiesFile(cookieStr: string): string {
 
 export async function searchBilibili(
   opts: SearchOptions
-): Promise<BilibiliSearchResult[]> {
+): Promise<ScraperResult[]> {
   const {
     keyword,
     page = 1,
@@ -148,7 +148,10 @@ export async function searchBilibili(
       return false;
     })
     .map((v) => ({
-      bvid: v.bvid ?? "",
+      platform: "BILIBILI",
+      sourceId: v.bvid ?? "",
+      sourceType: "VIDEO",
+      sourceUrl: v.arcurl ?? `https://www.bilibili.com/video/${v.bvid}`,
       title: stripHtmlTags(v.title ?? ""),
       description: stripHtmlTags(v.description ?? ""),
       thumbnail: v.pic?.startsWith("//") ? `https:${v.pic}` : (v.pic ?? ""),
@@ -160,6 +163,5 @@ export async function searchBilibili(
       publishedAt: v.pubdate
         ? new Date(v.pubdate * 1000).toISOString()
         : new Date().toISOString(),
-      sourceUrl: v.arcurl ?? `https://www.bilibili.com/video/${v.bvid}`,
     }));
 }

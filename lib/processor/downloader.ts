@@ -12,8 +12,18 @@ import os from "os";
 
 const execFileAsync = promisify(execFile);
 
-function getBilibiliCookiesFile(): string | null {
-  const cookieStr = process.env.BILIBILI_COOKIE;
+/** Map platform → { env var name, cookie domain } */
+const PLATFORM_COOKIES: Record<string, { envKey: string; domain: string }> = {
+  BILIBILI:    { envKey: "BILIBILI_COOKIE",    domain: ".bilibili.com" },
+  DOUYIN:      { envKey: "DOUYIN_COOKIE",      domain: ".douyin.com" },
+  XIAOHONGSHU: { envKey: "XIAOHONGSHU_COOKIE", domain: ".xiaohongshu.com" },
+};
+
+function getCookiesFile(platform?: string): string | null {
+  const cfg = PLATFORM_COOKIES[platform ?? "BILIBILI"];
+  if (!cfg) return null;
+
+  const cookieStr = process.env[cfg.envKey];
   if (!cookieStr) return null;
 
   const pairs = cookieStr.split(";").map((s) => s.trim()).filter(Boolean);
@@ -23,9 +33,9 @@ function getBilibiliCookiesFile(): string | null {
     if (eq === -1) continue;
     const name = pair.slice(0, eq).trim();
     const value = pair.slice(eq + 1).trim();
-    lines.push(`.bilibili.com\tTRUE\t/\tFALSE\t9999999999\t${name}\t${value}`);
+    lines.push(`${cfg.domain}\tTRUE\t/\tFALSE\t9999999999\t${name}\t${value}`);
   }
-  const tmpFile = path.join(os.tmpdir(), "contentmatrix-bilibili-cookies.txt");
+  const tmpFile = path.join(os.tmpdir(), `contentmatrix-${(platform ?? "bilibili").toLowerCase()}-cookies.txt`);
   fs.writeFileSync(tmpFile, lines.join("\n") + "\n", "utf-8");
   return tmpFile;
 }
@@ -50,7 +60,8 @@ export interface DownloadResult {
  */
 export async function downloadVideo(
   url: string,
-  jobId: string
+  jobId: string,
+  platform?: string
 ): Promise<DownloadResult> {
   await ensureDownloadDir();
 
@@ -67,7 +78,7 @@ export async function downloadVideo(
     "--progress",
   ];
 
-  const cookiesFile = getBilibiliCookiesFile();
+  const cookiesFile = getCookiesFile(platform);
   if (cookiesFile) {
     args.push("--cookies", cookiesFile);
   }

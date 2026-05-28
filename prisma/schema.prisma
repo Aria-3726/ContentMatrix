@@ -12,10 +12,11 @@ model Job {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
-  // Source info
-  platform  String @default("BILIBILI")
-  bvid      String @unique
-  sourceUrl String
+  // Source info — platform-agnostic
+  platform   String @default("BILIBILI") // BILIBILI | DOUYIN | XIAOHONGSHU
+  sourceId   String                      // Platform-specific ID (bvid, aweme_id, note_id)
+  sourceType String @default("VIDEO")    // VIDEO | IMAGE_NOTE (for Xiaohongshu)
+  sourceUrl  String
 
   // Original metadata
   title       String
@@ -48,10 +49,33 @@ model Job {
   subtitles       String @default("[]") // JSON [{start,end,text}]
   tags            String @default("[]") // JSON string[]
 
-  // Publish result
+  // Publications (multi-platform)
+  publications Publication[]
+
+  // Legacy YouTube fields (kept for backward compat)
   youtubeVideoId     String    @default("")
   youtubeUrl         String    @default("")
   publishedYoutubeAt DateTime?
 
+  @@unique([platform, sourceId])
   @@index([status])
+  @@index([platform])
+}
+
+model Publication {
+  id        String   @id @default(cuid())
+  createdAt DateTime @default(now())
+
+  jobId   String
+  job     Job    @relation(fields: [jobId], references: [id])
+
+  platform    String   // YOUTUBE | TIKTOK
+  externalId  String   @default("")
+  externalUrl String   @default("")
+  status      String   @default("PENDING") // PENDING | UPLOADING | PUBLISHED | FAILED
+  errorMsg    String   @default("")
+  publishedAt DateTime?
+
+  @@unique([jobId, platform])
+  @@index([jobId])
 }

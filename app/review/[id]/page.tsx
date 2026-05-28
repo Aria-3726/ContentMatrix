@@ -6,11 +6,13 @@ import type { SubtitleSegment } from "@/lib/db/types";
 
 interface Job {
   id: string;
+  platform: string;
+  sourceId: string;
+  sourceType: string;
   title: string;
   description: string;
   thumbnail: string;
   sourceUrl: string;
-  bvid: string;
   transcript: string;
   translatedTitle: string;
   translatedDesc: string;
@@ -53,6 +55,10 @@ export default function ReviewPage({
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [publishing, setPublishing] = useState(false);
+  const [publishTargets, setPublishTargets] = useState<Record<string, boolean>>({
+    YOUTUBE: true,
+    TIKTOK: false,
+  });
   const [toast, setToast] = useState<string | null>(null);
 
   const [editTitle, setEditTitle] = useState("");
@@ -121,19 +127,25 @@ export default function ReviewPage({
   };
 
   const handlePublish = async () => {
+    const targets = Object.entries(publishTargets)
+      .filter(([, v]) => v)
+      .map(([k]) => k);
+    if (targets.length === 0) {
+      showToast("请至少选择一个发布平台");
+      return;
+    }
     await handleSave();
     setPublishing(true);
     try {
       const res = await fetch(`/api/jobs/${id}/publish`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({}),
+        body: JSON.stringify({ targets }),
       });
       const data = (await res.json()) as { message?: string; error?: string };
       if (!res.ok) throw new Error(data.error ?? "发布失败");
-      showToast("上传已启动，请稍候…");
+      showToast(`正在上传到 ${targets.join(", ")}…`);
       await fetchJob();
-      // Start polling for status changes (PUBLISHING → PUBLISHED/FAILED)
       startPolling();
     } catch (err) {
       showToast(err instanceof Error ? err.message : "发布出错");
@@ -288,7 +300,10 @@ export default function ReviewPage({
               rel="noopener noreferrer"
               className="text-xs text-blue-600 hover:underline mt-2 block"
             >
-              查看 B 站原视频 →
+              {job.platform === "BILIBILI" ? "查看 B 站原视频" :
+               job.platform === "DOUYIN" ? "查看抖音原视频" :
+               job.platform === "XIAOHONGSHU" ? "查看小红书原笔记" :
+               "查看原内容"} →
             </a>
           </div>
 
@@ -446,7 +461,7 @@ export default function ReviewPage({
             </div>
           )}
 
-          {/* YouTube result */}
+          {/* Publication results */}
           {job.youtubeUrl && (
             <div className="bg-green-50 border border-green-200 rounded-xl p-3">
               <p className="text-xs text-green-700 font-medium mb-1">
@@ -463,7 +478,37 @@ export default function ReviewPage({
             </div>
           )}
 
-          {/* Action buttons */}
+          {/* Publish targets + action buttons */}
+          {job.status === "REVIEW_PENDING" && (
+            <div className="bg-white rounded-xl border border-gray-200 p-4 space-y-3">
+              <h2 className="font-semibold text-sm text-gray-500">发布平台</h2>
+              <div className="flex gap-4">
+                <label className="flex items-center gap-2 text-sm cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={publishTargets.YOUTUBE}
+                    onChange={(e) =>
+                      setPublishTargets((p) => ({ ...p, YOUTUBE: e.target.checked }))
+                    }
+                    className="rounded border-gray-300 text-red-600 focus:ring-red-500"
+                  />
+                  <span className="text-gray-700">YouTube</span>
+                </label>
+                <label className="flex items-center gap-2 text-sm cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={publishTargets.TIKTOK}
+                    onChange={(e) =>
+                      setPublishTargets((p) => ({ ...p, TIKTOK: e.target.checked }))
+                    }
+                    className="rounded border-gray-300 text-blue-600 focus:ring-blue-500"
+                  />
+                  <span className="text-gray-700">TikTok</span>
+                </label>
+              </div>
+            </div>
+          )}
+
           <div className="flex gap-3">
             <button
               onClick={handleSave}
@@ -478,7 +523,7 @@ export default function ReviewPage({
                 disabled={publishing}
                 className="flex-1 py-2.5 bg-red-600 hover:bg-red-700 text-white rounded-xl text-sm font-medium disabled:opacity-50 transition-colors"
               >
-                {publishing ? "上传中…" : "上传到 YouTube"}
+                {publishing ? "上传中…" : "发布"}
               </button>
             )}
           </div>

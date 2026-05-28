@@ -15,7 +15,9 @@ export async function GET(req: NextRequest) {
     orderBy: { createdAt: "desc" },
     select: {
       id: true,
-      bvid: true,
+      platform: true,
+      sourceId: true,
+      sourceType: true,
       title: true,
       thumbnail: true,
       duration: true,
