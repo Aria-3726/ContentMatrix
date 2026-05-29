@@ -1,19 +1,25 @@
 /**
- * One-time TikTok OAuth2 setup script.
+ * TikTok OAuth2 setup script (manual code exchange).
  * Run: npx tsx scripts/tiktok-auth.ts
  *
- * Opens browser → user authorizes → local server captures the code →
- * exchanges for access/refresh tokens → prints TIKTOK_REFRESH_TOKEN for .env
+ * Since TikTok requires HTTPS redirect URIs, this script uses a manual flow:
+ *   1. Opens the auth URL in browser
+ *   2. After user authorizes, TikTok redirects to the redirect URI with ?code=...
+ *   3. The page will fail to load (expected) — user copies the code from URL bar
+ *   4. Paste the code into the terminal
+ *   5. Script exchanges the code for tokens
  *
  * Prerequisites:
  *   1. Create an app at https://developers.tiktok.com/
- *   2. Request "Content Posting API" (video.publish) scope
- *   3. Set redirect URI to http://localhost:9005/callback
+ *   2. Request "Content Posting API" scopes
+ *   3. Set redirect URI to: https://localhost/callback
  *   4. Set TIKTOK_CLIENT_KEY and TIKTOK_CLIENT_SECRET in .env
  */
 
-import http from "http";
+import "dotenv/config";
+import crypto from "crypto";
 import { execSync } from "child_process";
+import readline from "readline";
 
 const CLIENT_KEY = process.env.TIKTOK_CLIENT_KEY ?? "";
 const CLIENT_SECRET = process.env.TIKTOK_CLIENT_SECRET ?? "";
@@ -21,73 +27,103 @@ const CLIENT_SECRET = process.env.TIKTOK_CLIENT_SECRET ?? "";
 if (!CLIENT_KEY || !CLIENT_SECRET) {
   console.error(
     "Set TIKTOK_CLIENT_KEY and TIKTOK_CLIENT_SECRET in your .env first.\n" +
-    "Get them from https://developers.tiktok.com/ → Your App → Keys"
+      "Get them from https://developers.tiktok.com/ → Your App → Keys"
   );
   process.exit(1);
 }
 
-const PORT = 9005;
-const REDIRECT_URI = `http://localhost:${PORT}/callback`;
+// This must match what you set in TikTok Developer Portal
+const REDIRECT_URI = "https://content-matrix-sigma.vercel.app/auth/tiktok/callback";
 
-// TikTok OAuth2 scopes for content posting
-const SCOPES = [
-  "user.info.basic",
-  "video.publish",
-  "video.upload",
-];
+const SCOPES = ["user.info.basic", "video.publish", "video.upload"];
 
-// Build authorization URL
+// ── PKCE ─────────────────────────────────────────────────────
+function generateCodeVerifier(): string {
+  return crypto.randomBytes(64).toString("base64url").slice(0, 128);
+}
+
+function generateCodeChallenge(verifier: string): string {
+  return crypto.createHash("sha256").update(verifier).digest("base64url");
+}
+
+const codeVerifier = generateCodeVerifier();
+const codeChallenge = generateCodeChallenge(codeVerifier);
+
+// ── Build auth URL ───────────────────────────────────────────
 const authParams = new URLSearchParams({
   client_key: CLIENT_KEY,
   scope: SCOPES.join(","),
   response_type: "code",
   redirect_uri: REDIRECT_URI,
   state: "contentmatrix",
+  code_challenge: codeChallenge,
+  code_challenge_method: "S256",
 });
 
 const authUrl = `https://www.tiktok.com/v2/auth/authorize/?${authParams.toString()}`;
 
-const server = http.createServer(async (req, res) => {
-  const url = new URL(req.url!, `http://localhost:${PORT}`);
+// ── Main ─────────────────────────────────────────────────────
 
-  if (url.pathname !== "/callback") {
-    res.writeHead(404);
-    res.end("Not found");
-    return;
-  }
+console.log("\n=== TikTok OAuth2 授权 ===\n");
+console.log("1. 打开以下链接并完成授权：\n");
+console.log(authUrl);
+console.log("\n2. 授权后浏览器会跳转到一个无法打开的页面（正常）");
+console.log("3. 从浏览器地址栏复制完整的 URL");
+console.log("   它看起来像：https://localhost/callback?code=XXXXX&...\n");
 
-  const code = url.searchParams.get("code");
-  const error = url.searchParams.get("error");
+try {
+  execSync(`open "${authUrl}"`);
+} catch {
+  // Non-fatal
+}
 
-  if (error) {
-    res.writeHead(400, { "Content-Type": "text/html; charset=utf-8" });
-    res.end(`<h1>❌ 授权失败</h1><p>${url.searchParams.get("error_description") ?? error}</p>`);
-    console.error("Auth error:", error, url.searchParams.get("error_description"));
-    server.close();
-    return;
+const rl = readline.createInterface({
+  input: process.stdin,
+  output: process.stdout,
+});
+
+rl.question("请粘贴完整的回调 URL（或只粘贴 code 值）：", async (input) => {
+  rl.close();
+
+  let code = input.trim();
+
+  // Extract code from URL if full URL was pasted
+  if (code.includes("code=")) {
+    try {
+      const url = new URL(code);
+      code = url.searchParams.get("code") ?? code;
+    } catch {
+      // Try regex fallback
+      const match = code.match(/code=([^&]+)/);
+      if (match) code = match[1];
+    }
   }
 
   if (!code) {
-    res.writeHead(400);
-    res.end("Missing code parameter");
-    return;
+    console.error("❌ 未提供 code");
+    process.exit(1);
   }
 
-  try {
-    // Exchange authorization code for access token
-    const tokenResp = await fetch("https://open.tiktokapis.com/v2/oauth/token/", {
-      method: "POST",
-      headers: { "Content-Type": "application/x-www-form-urlencoded" },
-      body: new URLSearchParams({
-        client_key: CLIENT_KEY,
-        client_secret: CLIENT_SECRET,
-        code,
-        grant_type: "authorization_code",
-        redirect_uri: REDIRECT_URI,
-      }),
-    });
+  console.log(`\n正在用 code 交换 token...`);
 
-    const tokenData = await tokenResp.json() as {
+  try {
+    const tokenResp = await fetch(
+      "https://open.tiktokapis.com/v2/oauth/token/",
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/x-www-form-urlencoded" },
+        body: new URLSearchParams({
+          client_key: CLIENT_KEY,
+          client_secret: CLIENT_SECRET,
+          code,
+          grant_type: "authorization_code",
+          redirect_uri: REDIRECT_URI,
+          code_verifier: codeVerifier,
+        }),
+      }
+    );
+
+    const data = (await tokenResp.json()) as {
       access_token?: string;
       refresh_token?: string;
       open_id?: string;
@@ -98,39 +134,22 @@ const server = http.createServer(async (req, res) => {
       error_description?: string;
     };
 
-    if (tokenData.error || !tokenData.access_token) {
-      throw new Error(
-        `Token exchange failed: ${tokenData.error_description ?? tokenData.error ?? "Unknown error"}`
+    if (data.error || !data.access_token) {
+      console.error(
+        `\n❌ Token 交换失败: ${data.error_description ?? data.error ?? "Unknown"}`
       );
+      process.exit(1);
     }
 
-    res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
-    res.end("<h1>✅ TikTok 授权成功！可以关闭此页面。</h1>");
-
     console.log("\n✅ TikTok 授权成功！请将以下内容添加到 .env：\n");
-    console.log(`TIKTOK_CLIENT_KEY=${CLIENT_KEY}`);
-    console.log(`TIKTOK_CLIENT_SECRET=${CLIENT_SECRET}`);
-    console.log(`TIKTOK_ACCESS_TOKEN=${tokenData.access_token}`);
-    console.log(`TIKTOK_REFRESH_TOKEN=${tokenData.refresh_token}`);
-    console.log(`TIKTOK_OPEN_ID=${tokenData.open_id}`);
-    console.log(`\nAccess token expires in: ${tokenData.expires_in}s`);
-    console.log(`Refresh token expires in: ${tokenData.refresh_expires_in}s`);
-    console.log(`Granted scopes: ${tokenData.scope}\n`);
+    console.log(`TIKTOK_ACCESS_TOKEN=${data.access_token}`);
+    console.log(`TIKTOK_REFRESH_TOKEN=${data.refresh_token}`);
+    console.log(`TIKTOK_OPEN_ID=${data.open_id}`);
+    console.log(`\nAccess token expires in: ${data.expires_in}s`);
+    console.log(`Refresh token expires in: ${data.refresh_expires_in}s`);
+    console.log(`Granted scopes: ${data.scope}\n`);
   } catch (err) {
-    res.writeHead(500, { "Content-Type": "text/html; charset=utf-8" });
-    res.end("<h1>❌ Token 交换失败</h1>");
-    console.error("Token exchange failed:", err);
-  }
-
-  server.close();
-});
-
-server.listen(PORT, () => {
-  console.log(`\n正在打开浏览器进行 TikTok 授权...\n`);
-  console.log(`如果浏览器没有自动打开，请手动访问：\n${authUrl}\n`);
-  try {
-    execSync(`open "${authUrl}"`);
-  } catch {
-    // Non-fatal: user can copy URL manually
+    console.error("❌ 请求失败:", err);
+    process.exit(1);
   }
 });

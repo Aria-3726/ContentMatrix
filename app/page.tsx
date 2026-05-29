@@ -11,6 +11,7 @@ export default function Dashboard() {
   const [searchLoading, setSearchLoading] = useState(false);
   const [actionLoading, setActionLoading] = useState<string | null>(null);
   const [statusFilter, setStatusFilter] = useState<string | null>(null);
+  const [searchResultIds, setSearchResultIds] = useState<Set<string> | null>(null);
   const [toast, setToast] = useState<{ msg: string; type: "ok" | "err" } | null>(null);
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
@@ -42,9 +43,20 @@ export default function Dashboard() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ keyword, minViews, platform }),
       });
-      const data = await res.json() as { created: number; existing: number; error?: string };
+      const data = await res.json() as {
+        created: number;
+        existing: number;
+        results?: { sourceId: string }[];
+        error?: string;
+      };
       if (!res.ok) throw new Error(data.error ?? "搜索失败");
       showToast(`发现 ${data.created} 条新内容，${data.existing} 条已存在`);
+
+      // Filter the view to show only this search's results
+      if (data.results?.length) {
+        setSearchResultIds(new Set(data.results.map((r) => r.sourceId)));
+        setStatusFilter(null); // Clear status filter to show search results
+      }
       await fetchJobs();
     } catch (err) {
       showToast(err instanceof Error ? err.message : "搜索出错", "err");
@@ -77,9 +89,13 @@ export default function Dashboard() {
     }
   };
 
-  const filteredJobs = statusFilter
-    ? jobs.filter((j) => j.status === statusFilter)
+  // Apply filters: search results first, then status
+  let filteredJobs = searchResultIds
+    ? jobs.filter((j) => searchResultIds.has(j.sourceId))
     : jobs;
+  if (statusFilter) {
+    filteredJobs = filteredJobs.filter((j) => j.status === statusFilter);
+  }
 
   return (
     <div className="min-h-screen bg-gray-50">
@@ -90,7 +106,11 @@ export default function Dashboard() {
             <h1 className="text-lg font-bold text-gray-900">🎮 ContentMatrix</h1>
             <p className="text-xs text-gray-500">Pocomo · 海外三方号内容工作流</p>
           </div>
-          <div className="text-xs text-gray-400">{jobs.length} 条任务</div>
+          <div className="text-xs text-gray-400">
+            {searchResultIds
+              ? `${filteredJobs.length} / ${jobs.length} 条任务`
+              : `${jobs.length} 条任务`}
+          </div>
         </div>
       </header>
 
@@ -101,9 +121,24 @@ export default function Dashboard() {
         {/* Search */}
         <SearchPanel onSearch={handleSearch} isLoading={searchLoading} />
 
+        {/* Search filter banner */}
+        {searchResultIds && (
+          <div className="flex items-center gap-3 mb-3 px-3 py-2 bg-blue-50 border border-blue-200 rounded-lg text-sm">
+            <span className="text-blue-700">
+              🔍 显示本次搜索结果（{filteredJobs.length} 条）
+            </span>
+            <button
+              onClick={() => setSearchResultIds(null)}
+              className="text-blue-600 hover:text-blue-800 underline text-xs"
+            >
+              显示全部任务
+            </button>
+          </div>
+        )}
+
         {/* Pipeline filter pills */}
         <PipelineStats
-          jobs={jobs}
+          jobs={searchResultIds ? filteredJobs : jobs}
           activeFilter={statusFilter}
           onFilterChange={setStatusFilter}
         />

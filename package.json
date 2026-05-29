@@ -4,7 +4,7 @@
   "private": true,
   "scripts": {
     "dev": "next dev",
-    "build": "next build",
+    "build": "prisma generate && next build",
     "start": "next start",
     "lint": "eslint"
   },
@@ -17,6 +17,7 @@
     "node-edge-tts": "^1.2.10",
     "openai": "^6.39.0",
     "prisma": "^7.8.0",
+    "puppeteer": "^25.1.0",
     "react": "19.2.4",
     "react-dom": "19.2.4",
     "undici": "^8.3.0"

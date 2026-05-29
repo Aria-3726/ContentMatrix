@@ -179,7 +179,8 @@ export async function POST(
     await prisma.job.update({
       where: { id },
       data: {
-        status: allFailed ? "FAILED" : "PUBLISHED",
+        // Publish fail → back to REVIEW_PENDING so user can retry without re-processing
+        status: allFailed ? "REVIEW_PENDING" : "PUBLISHED",
         errorMsg: allSuccess ? "" : errors,
       },
     });

@@ -1,12 +1,9 @@
 /**
  * Xiaohongshu (小红书 / RedNote) content scraper.
  *
- * Supports both video notes and image notes (IMAGE_NOTE type).
- *
- * Architecture:
- *   - Primary: Hit the search API at edith.xiaohongshu.com with cookies
- *   - The API requires X-s, X-t, X-s-common signature headers which rotate monthly
- *   - If signatures are stale / missing, falls back to SSR data from note pages
+ * Uses Puppeteer to automate the XHS search page. The browser handles
+ * all signature generation (X-s, X-t, X-s-common) automatically.
+ * We intercept the internal API response to get clean JSON data.
  *
  * Requires XIAOHONGSHU_COOKIE env var from a logged-in browser session.
  *
@@ -16,14 +13,15 @@
  */
 
 import type { ScraperResult } from "@/lib/db/types";
+import puppeteer, { type Browser, type CookieParam } from "puppeteer";
 
 export interface XhsSearchOptions {
   keyword: string;
   page?: number;
   pageSize?: number;
-  minViews?: number;       // Note: XHS doesn't expose view count publicly
-  minLikes?: number;       // Use likes as primary filter instead
-  noteType?: 0 | 1 | 2;   // 0=all, 1=video, 2=image
+  minViews?: number;
+  minLikes?: number;
+  noteType?: 0 | 1 | 2; // 0=all, 1=video, 2=image
 }
 
 /** Shape of a note_card inside search results */
@@ -54,7 +52,7 @@ interface XhsNoteCard {
   }[];
   video?: {
     consumer?: { origin_video_key?: string };
-    duration?: number; // seconds
+    duration?: number;
   };
   tag_list?: { name?: string }[];
   time?: number;
@@ -68,126 +66,167 @@ interface XhsSearchItem {
   xsec_token?: string;
 }
 
-const COMMON_HEADERS: Record<string, string> = {
-  "User-Agent":
-    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
-  Accept: "application/json, text/plain, */*",
-  "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
-  Origin: "https://www.xiaohongshu.com",
-  Referer: "https://www.xiaohongshu.com/",
-};
+// ── Cookie helpers ────────────────────────────────────────────
 
-/**
- * Parse like count string ("1.2万", "567") to number.
- */
+function parseCookieString(cookieStr: string): CookieParam[] {
+  return cookieStr
+    .split(";")
+    .map((pair) => {
+      const eqIndex = pair.indexOf("=");
+      if (eqIndex === -1) return null;
+      const name = pair.slice(0, eqIndex).trim();
+      const value = pair.slice(eqIndex + 1).trim();
+      if (!name) return null;
+      return {
+        name,
+        value,
+        domain: ".xiaohongshu.com",
+        path: "/",
+      } as CookieParam;
+    })
+    .filter((c): c is CookieParam => c !== null);
+}
+
+// ── Data helpers ─────────────────────────────────────────────
+
 function parseLikeCount(s: string | undefined): number {
   if (!s) return 0;
   if (s.endsWith("万")) return Math.round(parseFloat(s) * 10000);
   return parseInt(s, 10) || 0;
 }
 
-/**
- * Get cover image URL from a note card.
- */
 function getCoverUrl(card: XhsNoteCard): string {
-  const infoList = card.cover?.info_list ?? [];
-  // Prefer WB_DFT (default web) or first available
+  // Try multiple cover URL sources — XHS format varies
+  const cover = card.cover as Record<string, unknown> | undefined;
+  if (!cover) return "";
+
+  // Direct URL fields (most common in search results)
+  for (const key of ["url_default", "url_pre", "url"]) {
+    const val = cover[key];
+    if (typeof val === "string" && val.length > 0) {
+      return val.startsWith("//") ? `https:${val}` : val;
+    }
+  }
+
+  // info_list fallback (note detail pages)
+  const infoList = (cover.info_list as { image_scene?: string; url?: string }[]) ?? [];
   const dft = infoList.find((i) => i.image_scene === "WB_DFT");
   const url = dft?.url ?? infoList[0]?.url ?? "";
   return url.startsWith("//") ? `https:${url}` : url;
 }
 
+// ── Browser-based search ─────────────────────────────────────
+
 /**
- * Primary approach: Call the Xiaohongshu search API directly.
- * Requires valid cookies with a1, web_session, webId.
- * May fail if X-s/X-t/X-s-common signatures are required and not provided.
+ * Search XHS using Puppeteer. The browser handles signature generation.
+ * We intercept the internal search API response for clean data.
  */
-async function fetchSearchAPI(
+async function searchWithBrowser(
   keyword: string,
-  page: number,
-  pageSize: number,
-  noteType: number
+  cookieStr: string
 ): Promise<XhsSearchItem[]> {
-  const cookieStr = process.env.XIAOHONGSHU_COOKIE;
-  if (!cookieStr) {
-    throw new Error(
-      "需要设置 XIAOHONGSHU_COOKIE 环境变量才能搜索小红书内容。\n" +
-        "获取方法：浏览器登录 xiaohongshu.com → F12 → Network → 复制 Cookie"
+  let browser: Browser | null = null;
+
+  try {
+    browser = await puppeteer.launch({
+      headless: true,
+      args: [
+        "--no-sandbox",
+        "--disable-setuid-sandbox",
+        "--disable-blink-features=AutomationControlled",
+      ],
+    });
+
+    const page = await browser.newPage();
+
+    // Mask automation signals
+    await page.evaluateOnNewDocument(() => {
+      Object.defineProperty(navigator, "webdriver", { get: () => false });
+      // @ts-expect-error -- removing chrome automation traces
+      delete navigator.__proto__.webdriver;
+    });
+
+    await page.setUserAgent(
+      "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
     );
+
+    // Set cookies from env var
+    const cookies = parseCookieString(cookieStr);
+    await page.setCookie(...cookies);
+
+    // Set up response interception to capture search API results
+    const apiResultPromise = new Promise<XhsSearchItem[]>((resolve) => {
+      const timeout = setTimeout(() => {
+        console.warn("[xiaohongshu] Timed out waiting for search API response");
+        resolve([]);
+      }, 25_000);
+
+      page.on("response", async (response) => {
+        const url = response.url();
+        if (url.includes("/api/sns/web/v1/search/notes")) {
+          try {
+            const json = (await response.json()) as {
+              success?: boolean;
+              data?: { items?: XhsSearchItem[] };
+              code?: number;
+              msg?: string;
+            };
+            if (json.success && json.data?.items) {
+              clearTimeout(timeout);
+              resolve(json.data.items);
+            } else if (json.code) {
+              console.warn(
+                `[xiaohongshu] Search API returned code ${json.code}: ${json.msg}`
+              );
+              // Don't resolve yet — might get a retry
+            }
+          } catch {
+            // Response wasn't JSON — ignore
+          }
+        }
+      });
+    });
+
+    // Navigate to search page
+    const searchUrl = `https://www.xiaohongshu.com/search_result?keyword=${encodeURIComponent(keyword)}&source=web_search_result_notes`;
+    console.log("[xiaohongshu] Navigating to search page...");
+
+    await page.goto(searchUrl, {
+      waitUntil: "domcontentloaded",
+      timeout: 30_000,
+    });
+
+    // Wait for search results to load
+    console.log("[xiaohongshu] Waiting for search results...");
+    const items = await apiResultPromise;
+
+    console.log(`[xiaohongshu] Got ${items.length} results from browser`);
+    return items;
+  } finally {
+    if (browser) {
+      await browser.close();
+    }
   }
-
-  const url = "https://edith.xiaohongshu.com/api/sns/web/v1/search/notes";
-
-  const body = JSON.stringify({
-    keyword,
-    page,
-    page_size: pageSize,
-    search_id: generateSearchId(),
-    sort: "general",
-    note_type: noteType,
-    image_formats: ["jpg", "webp", "avif"],
-    ext_flags: [],
-  });
-
-  // Extract a1 cookie for potential signing
-  const a1Match = cookieStr.match(/(?:^|;\s*)a1=([^;]+)/);
-  const a1 = a1Match?.[1] ?? "";
-
-  const resp = await fetch(url, {
-    method: "POST",
-    headers: {
-      ...COMMON_HEADERS,
-      Cookie: cookieStr,
-      "Content-Type": "application/json;charset=UTF-8",
-      // Basic X-s-common header (may not be sufficient for all requests)
-      "X-s-common": generateBasicXsCommon(a1),
-    },
-    body,
-  });
-
-  if (resp.status === 461) {
-    throw new Error(
-      "小红书需要签名验证（HTTP 461）。Cookie 可能已过期，请在浏览器中重新登录后更新 XIAOHONGSHU_COOKIE"
-    );
-  }
-
-  if (!resp.ok) {
-    throw new Error(`小红书搜索 API 返回 ${resp.status}: ${resp.statusText}`);
-  }
-
-  const json = (await resp.json()) as {
-    success?: boolean;
-    data?: { has_more?: boolean; items?: XhsSearchItem[] };
-    msg?: string;
-    code?: number;
-  };
-
-  if (!json.success) {
-    throw new Error(
-      `小红书搜索失败: ${json.msg ?? "unknown"} (code: ${json.code})`
-    );
-  }
-
-  return json.data?.items ?? [];
 }
 
 /**
- * Fallback: Fetch the search page HTML and try to extract embedded data.
- * Xiaohongshu search pages load results via AJAX, so this is unlikely
- * to find search results — but we try as a best-effort fallback.
+ * Fallback: extract __INITIAL_STATE__ from the SSR HTML.
+ * XHS embeds some data in the page, though search results
+ * are typically loaded via AJAX.
  */
-async function fetchSSRSearchData(
-  keyword: string
+async function searchFromSSR(
+  keyword: string,
+  cookieStr: string
 ): Promise<XhsSearchItem[]> {
-  const cookieStr = process.env.XIAOHONGSHU_COOKIE;
-  if (!cookieStr) return [];
-
   const url = `https://www.xiaohongshu.com/search_result?keyword=${encodeURIComponent(keyword)}&source=web_search_result_notes`;
 
   const resp = await fetch(url, {
     headers: {
-      ...COMMON_HEADERS,
-      Accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+      "User-Agent":
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+      Accept:
+        "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+      "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
       Cookie: cookieStr,
     },
   });
@@ -196,21 +235,24 @@ async function fetchSSRSearchData(
 
   const html = await resp.text();
 
-  // Try to find __INITIAL_STATE__ embedded data
-  const stateMatch = html.match(
-    /window\.__INITIAL_STATE__\s*=\s*(\{[\s\S]*?\})\s*<\/script>/
-  );
+  // Find __INITIAL_STATE__ — use indexOf for robustness
+  const marker = "window.__INITIAL_STATE__=";
+  const idx = html.indexOf(marker);
+  if (idx === -1) return [];
 
-  if (!stateMatch?.[1]) return [];
+  const start = idx + marker.length;
+  const scriptEnd = html.indexOf("</script>", start);
+  if (scriptEnd === -1) return [];
+
+  let jsonStr = html.substring(start, scriptEnd).trim();
+  // Remove trailing semicolons
+  jsonStr = jsonStr.replace(/;\s*$/, "");
+  // XHS uses `undefined` in state — replace with null
+  jsonStr = jsonStr.replace(/\bundefined\b/g, "null");
 
   try {
-    // Xiaohongshu uses `undefined` in the JSON-like state, replace with null
-    const cleaned = stateMatch[1].replace(/\bundefined\b/g, "null");
-    const state = JSON.parse(cleaned) as Record<string, unknown>;
-
-    // Try to find search results in the state
-    const items = extractNotesFromState(state);
-    return items;
+    const state = JSON.parse(jsonStr) as Record<string, unknown>;
+    return extractNotesFromState(state);
   } catch {
     return [];
   }
@@ -249,89 +291,57 @@ function extractNotesFromState(
   return items;
 }
 
-/**
- * Generate a random search_id (UUID-like hex string).
- */
-function generateSearchId(): string {
-  const hex = "0123456789abcdef";
-  let id = "";
-  for (let i = 0; i < 32; i++) {
-    id += hex[Math.floor(Math.random() * 16)];
-  }
-  return id;
-}
-
-/**
- * Generate a basic X-s-common header.
- * This is a simplified version — the real algorithm rotates.
- * It may be enough with fresh cookies, but not always.
- */
-function generateBasicXsCommon(a1: string): string {
-  // Minimal X-s-common header (platform context)
-  // The real one is computed from an obfuscated JS function
-  const payload = {
-    s0: 5,   // platform (5 = web)
-    s1: "",
-    x0: "1",
-    x1: "3.9.1", // web app version (approximate)
-    x2: "Windows",
-    x3: "xhs-pc-web",
-    x4: "4.27.3",
-    x5: a1,
-    x6: Date.now(),
-    x7: "",
-    x8: "",
-    x9: "",
-    x10: 0,
-  };
-
-  try {
-    return Buffer.from(JSON.stringify(payload)).toString("base64");
-  } catch {
-    return "";
-  }
-}
+// ── Main export ──────────────────────────────────────────────
 
 /**
  * Search Xiaohongshu for notes matching the given keyword.
- * Returns both video and image notes.
+ *
+ * Strategy:
+ *   1. Puppeteer browser (handles signatures automatically)
+ *   2. SSR __INITIAL_STATE__ extraction (fallback)
  */
 export async function searchXiaohongshu(
   opts: XhsSearchOptions
 ): Promise<ScraperResult[]> {
-  const {
-    keyword,
-    page = 1,
-    pageSize = 20,
-    minLikes = 100,
-    noteType = 0, // all types
-  } = opts;
+  const { keyword, minLikes = 100 } = opts;
 
-  let items: XhsSearchItem[] = [];
-  let lastError: Error | null = null;
-
-  // Strategy 1: Direct API call
-  try {
-    items = await fetchSearchAPI(keyword, page, pageSize, noteType);
-  } catch (err) {
-    lastError = err instanceof Error ? err : new Error(String(err));
-    console.warn("[xiaohongshu] API call failed:", lastError.message);
+  const cookieStr = process.env.XIAOHONGSHU_COOKIE;
+  if (!cookieStr) {
+    throw new Error(
+      "需要设置 XIAOHONGSHU_COOKIE 环境变量才能搜索小红书内容。\n" +
+        "获取方法：浏览器登录 xiaohongshu.com → F12 → Network → 复制 Cookie"
+    );
   }
 
-  // Strategy 2: SSR data extraction
+  let items: XhsSearchItem[] = [];
+
+  // Strategy 1: Puppeteer browser search
+  try {
+    items = await searchWithBrowser(keyword, cookieStr);
+  } catch (err) {
+    console.warn(
+      "[xiaohongshu] Browser search failed:",
+      err instanceof Error ? err.message : err
+    );
+  }
+
+  // Strategy 2: SSR fallback
   if (items.length === 0) {
     try {
-      items = await fetchSSRSearchData(keyword);
+      items = await searchFromSSR(keyword, cookieStr);
     } catch (err) {
-      const ssrErr = err instanceof Error ? err : new Error(String(err));
-      console.warn("[xiaohongshu] SSR extraction failed:", ssrErr.message);
-      if (lastError) throw lastError;
-      throw ssrErr;
+      console.warn(
+        "[xiaohongshu] SSR extraction failed:",
+        err instanceof Error ? err.message : err
+      );
     }
   }
 
-  if (items.length === 0 && lastError) {
-    throw lastError;
+  if (items.length === 0) {
+    throw new Error(
+      "小红书搜索未返回结果。可能原因：Cookie 已过期或被限流。\n" +
+        "请在浏览器中重新登录 xiaohongshu.com 并更新 XIAOHONGSHU_COOKIE"
+    );
   }
 
   // Map to ScraperResult
@@ -348,16 +358,21 @@ export async function searchXiaohongshu(
       const likes = parseLikeCount(card.interact_info?.liked_count);
       const durationSec = isVideo ? (card.video?.duration ?? 0) : 0;
 
+      // XHS requires xsec_token in URL to view notes found via search
+      const xsecParam = item.xsec_token
+        ? `?xsec_token=${encodeURIComponent(item.xsec_token)}&xsec_source=pc_search`
+        : "";
+
       return {
         platform: "XIAOHONGSHU",
         sourceId: item.id!,
         sourceType: isVideo ? "VIDEO" : "IMAGE_NOTE",
-        sourceUrl: `https://www.xiaohongshu.com/explore/${item.id}`,
+        sourceUrl: `https://www.xiaohongshu.com/explore/${item.id}${xsecParam}`,
         title: card.display_title ?? "",
         description: card.desc ?? card.display_title ?? "",
         thumbnail: getCoverUrl(card),
         duration: durationSec,
-        viewCount: 0, // XHS doesn't expose view count publicly
+        viewCount: 0,
         likeCount: likes,
         authorName: card.user?.nickname ?? "",
         authorId: card.user?.user_id ?? "",

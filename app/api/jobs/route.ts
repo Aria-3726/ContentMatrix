@@ -32,6 +32,10 @@ export async function GET(req: NextRequest) {
       createdAt: true,
       updatedAt: true,
       sourceUrl: true,
+      localVideoPath: true,
+      processedVideoPath: true,
+      transcript: true,
+      subtitles: true,
     },
   });
 
