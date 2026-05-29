@@ -1,27 +1,22 @@
 /**
- * TikTok publisher — connects to the user's running Chrome via remote debugging.
+ * TikTok publisher — uses the Content Posting API v2 (FILE_UPLOAD method).
  *
- * Instead of launching a separate browser (which has no TikTok session),
- * this connects to the user's actual Chrome browser where TikTok is already
- * logged in. It opens a new tab, uploads the video, then closes the tab.
+ * Flow:
+ *   1. POST /v2/post/publish/video/init/  → get publish_id + upload_url
+ *   2. PUT chunks to upload_url           → chunked HTTP upload
+ *   3. POST /v2/post/publish/status/fetch/ → poll until PUBLISH_COMPLETE
  *
- * How it works:
- *   1. Check if Chrome is running with --remote-debugging-port=9222
- *   2. If not, restart Chrome with that flag (restores all tabs)
- *   3. Connect via puppeteer.connect()
- *   4. Open new tab → TikTok Studio → upload → close tab
- *   5. Disconnect (does NOT close Chrome)
- *
- * Prerequisite: Be logged into tiktok.com in Google Chrome.
+ * Requires:
+ *   TIKTOK_ACCESS_TOKEN  — from scripts/tiktok-auth.ts
+ *   TIKTOK_REFRESH_TOKEN — from scripts/tiktok-auth.ts
+ *   TIKTOK_CLIENT_KEY    — from TikTok Developer Portal
+ *   TIKTOK_CLIENT_SECRET — from TikTok Developer Portal
  */
 
-import puppeteer, { type Browser, type Page } from "puppeteer";
-import { execSync } from "child_process";
 import fs from "fs";
 
-const UPLOAD_URL = "https://www.tiktok.com/tiktokstudio/upload";
-const DEBUG_PORT = 9222;
-const DEBUG_URL = `http://127.0.0.1:${DEBUG_PORT}`;
+const API_BASE = "https://open.tiktokapis.com/v2";
+const CHUNK_SIZE = 10 * 1024 * 1024; // 10 MB per chunk
 
 // ── Types ────────────────────────────────────────────────────
 
@@ -30,81 +25,192 @@ export interface TikTokUploadOptions {
   title: string;
   description?: string;
   tags?: string[];
+  /** "PUBLIC_TO_EVERYONE" | "FOLLOWER_OF_CREATOR" | "MUTUAL_FOLLOW_FRIENDS" | "SELF_ONLY" */
   privacyLevel?: string;
+  /** If true, publishes directly (requires video.publish scope). Defaults to true. */
+  directPost?: boolean;
 }
 
 export interface TikTokUploadResult {
   publishId: string;
 }
 
-// ── Chrome Connection ────────────────────────────────────────
+// ── Token refresh ────────────────────────────────────────────
 
-/**
- * Check if Chrome is running with remote debugging enabled.
- */
-async function isDebugPortOpen(): Promise<string | null> {
-  try {
-    const resp = await fetch(`${DEBUG_URL}/json/version`, {
-      signal: AbortSignal.timeout(2000),
-    });
-    const data = (await resp.json()) as { webSocketDebuggerUrl?: string };
-    return data.webSocketDebuggerUrl ?? null;
-  } catch {
-    return null;
-  }
-}
+async function refreshAccessToken(): Promise<string> {
+  const refreshToken = process.env.TIKTOK_REFRESH_TOKEN;
+  const clientKey = process.env.TIKTOK_CLIENT_KEY;
+  const clientSecret = process.env.TIKTOK_CLIENT_SECRET;
 
-/**
- * Connect to Chrome via remote debugging.
- * If Chrome doesn't have debugging enabled, configure it for the NEXT launch
- * and ask the user to restart Chrome manually — never auto-quit Chrome.
- */
-async function connectToChrome(): Promise<Browser> {
-  const wsUrl = await isDebugPortOpen();
-
-  if (wsUrl) {
-    console.log("[tiktok] Connected to existing Chrome");
-    return puppeteer.connect({
-      browserWSEndpoint: wsUrl,
-      defaultViewport: null,
-    });
-  }
-
-  // Chrome doesn't have debugging enabled.
-  // Configure it so the NEXT normal Chrome launch will have the port.
-  // This is a one-time setup — never auto-quit Chrome.
-  try {
-    execSync(
-      `defaults write com.google.Chrome CommandLineFlags '--remote-debugging-port=${DEBUG_PORT}'`,
-      { stdio: "pipe" }
+  if (!refreshToken || !clientKey || !clientSecret) {
+    throw new Error(
+      "Missing TIKTOK_REFRESH_TOKEN, TIKTOK_CLIENT_KEY or TIKTOK_CLIENT_SECRET in .env"
     );
-    console.log("[tiktok] Chrome configured for remote debugging on next launch");
-  } catch {
-    // Ignore if defaults write fails
   }
 
-  throw new Error(
-    "需要一次性设置：请手动重启 Chrome（退出再重新打开），之后发布 TikTok 就会全自动了。\n\n" +
-    "重启 Chrome 不会丢失标签页（Chrome 会自动恢复）。"
+  const resp = await fetch(`${API_BASE}/oauth/token/`, {
+    method: "POST",
+    headers: { "Content-Type": "application/x-www-form-urlencoded" },
+    body: new URLSearchParams({
+      client_key: clientKey,
+      client_secret: clientSecret,
+      grant_type: "refresh_token",
+      refresh_token: refreshToken,
+    }),
+  });
+
+  const data = (await resp.json()) as {
+    access_token?: string;
+    error?: string;
+    error_description?: string;
+  };
+
+  if (!data.access_token) {
+    throw new Error(
+      `Token refresh failed: ${data.error_description ?? data.error ?? "unknown"}`
+    );
+  }
+
+  // Update env var in memory for this process
+  process.env.TIKTOK_ACCESS_TOKEN = data.access_token;
+  console.log("[tiktok] Access token refreshed");
+  return data.access_token;
+}
+
+async function getAccessToken(): Promise<string> {
+  let token = process.env.TIKTOK_ACCESS_TOKEN;
+  if (!token) {
+    console.log("[tiktok] No access token — attempting refresh...");
+    token = await refreshAccessToken();
+  }
+  return token;
+}
+
+// ── API helpers ──────────────────────────────────────────────
+
+async function apiPost<T>(
+  path: string,
+  body: unknown,
+  token: string
+): Promise<T> {
+  const resp = await fetch(`${API_BASE}${path}`, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${token}`,
+      "Content-Type": "application/json; charset=UTF-8",
+    },
+    body: JSON.stringify(body),
+  });
+
+  const data = (await resp.json()) as { data?: T; error?: { code?: string; message?: string; log_id?: string } };
+
+  if (data.error?.code && data.error.code !== "ok") {
+    throw new Error(
+      `TikTok API error [${data.error.code}]: ${data.error.message ?? ""} (log_id: ${data.error.log_id ?? ""})`
+    );
+  }
+
+  return data.data as T;
+}
+
+// ── Upload chunks ────────────────────────────────────────────
+
+async function uploadChunks(
+  uploadUrl: string,
+  filePath: string,
+  fileSize: number
+): Promise<void> {
+  const totalChunks = Math.ceil(fileSize / CHUNK_SIZE);
+  const fd = fs.openSync(filePath, "r");
+
+  try {
+    for (let i = 0; i < totalChunks; i++) {
+      const start = i * CHUNK_SIZE;
+      const end = Math.min(start + CHUNK_SIZE, fileSize) - 1;
+      const chunkSize = end - start + 1;
+
+      const buffer = Buffer.alloc(chunkSize);
+      fs.readSync(fd, buffer, 0, chunkSize, start);
+
+      console.log(
+        `[tiktok] Uploading chunk ${i + 1}/${totalChunks} (${(chunkSize / 1024 / 1024).toFixed(1)} MB)...`
+      );
+
+      const putResp = await fetch(uploadUrl, {
+        method: "PUT",
+        headers: {
+          "Content-Range": `bytes ${start}-${end}/${fileSize}`,
+          "Content-Type": "video/mp4",
+          "Content-Length": String(chunkSize),
+        },
+        body: buffer,
+      });
+
+      if (!putResp.ok) {
+        const text = await putResp.text().catch(() => "");
+        throw new Error(
+          `Chunk ${i + 1} upload failed (${putResp.status}): ${text}`
+        );
+      }
+    }
+  } finally {
+    fs.closeSync(fd);
+  }
+}
+
+// ── Poll publish status ──────────────────────────────────────
+
+async function pollPublishStatus(
+  publishId: string,
+  token: string
+): Promise<void> {
+  const maxAttempts = 60;
+  const delayMs = 5000;
+
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    await new Promise((r) => setTimeout(r, delayMs));
+
+    const status = await apiPost<{
+      status?: string;
+      fail_reason?: string;
+      publicly_available_post_id?: string[];
+    }>(
+      "/post/publish/status/fetch/",
+      { publish_id: publishId },
+      token
+    );
+
+    console.log(`[tiktok] Status (${attempt}/${maxAttempts}): ${status.status}`);
+
+    if (status.status === "PUBLISH_COMPLETE") {
+      console.log("[tiktok] Published successfully!");
+      return;
+    }
+
+    if (
+      status.status === "FAILED" ||
+      status.status === "PUBLISH_FAILED"
+    ) {
+      throw new Error(
+        `TikTok publish failed: ${status.fail_reason ?? "unknown reason"}`
+      );
+    }
+
+    // PROCESSING_UPLOAD, PROCESSING_DOWNLOAD, SENDING_TO_USER_INBOX, etc. → keep polling
+  }
+
+  console.warn(
+    "[tiktok] Timed out polling publish status — check TikTok manually"
   );
 }
 
-// ── Helpers ──────────────────────────────────────────────────
-
-async function waitMs(page: Page, ms: number): Promise<void> {
-  await page.evaluate(
-    (t) => new Promise<void>((r) => setTimeout(r, t)),
-    ms
-  );
-}
-
-// ── Main Export ──────────────────────────────────────────────
+// ── Main export ──────────────────────────────────────────────
 
 /**
- * Upload a video to TikTok using the user's Chrome browser.
+ * Upload a video to TikTok using the Content Posting API v2.
  *
- * Connects to Chrome via remote debugging — uses the user's actual
- * TikTok session. No separate login needed.
+ * Requires a valid TIKTOK_ACCESS_TOKEN (or TIKTOK_REFRESH_TOKEN to auto-refresh).
+ * Run `npx tsx scripts/tiktok-auth.ts` to obtain tokens.
  */
 export async function uploadToTikTok(
   opts: TikTokUploadOptions
@@ -118,164 +224,53 @@ export async function uploadToTikTok(
     `[tiktok] Uploading ${(fileSize / 1024 / 1024).toFixed(1)} MB to TikTok...`
   );
 
-  // Connect to user's Chrome
-  const browser = await connectToChrome();
-  let page: Page | null = null;
+  const token = await getAccessToken();
+  const totalChunks = Math.ceil(fileSize / CHUNK_SIZE);
 
-  try {
-    // Open a NEW tab (don't touch existing tabs)
-    page = await browser.newPage();
-
-    // Navigate to TikTok Studio upload
-    console.log("[tiktok] Opening TikTok Studio...");
-    await page.goto(UPLOAD_URL, {
-      waitUntil: "networkidle2",
-      timeout: 30_000,
-    });
-
-    // Check login state
-    const currentUrl = page.url();
-    if (
-      currentUrl.includes("/login") ||
-      currentUrl.includes("/passport") ||
-      currentUrl.includes("login_redirect")
-    ) {
-      throw new Error(
-        "TikTok 未登录。请先在 Chrome 中登录 tiktok.com 后再试。"
-      );
-    }
-
-    // ── Upload video ─────────────────────────────────────────
-    console.log("[tiktok] Looking for file input...");
-    const fileInput = await page.waitForSelector('input[type="file"]', {
-      timeout: 15_000,
-    });
-    if (!fileInput) throw new Error("找不到文件上传输入框");
-
-    await fileInput.uploadFile(opts.videoFilePath);
-    console.log("[tiktok] Video selected, uploading...");
-
-    // Wait for caption editor (signals upload complete)
-    console.log("[tiktok] Waiting for upload to finish...");
-    await page.waitForSelector(
-      [
-        ".DraftEditor-root",
-        '[contenteditable="true"][data-contents]',
-        '[data-text="true"]',
-        '[contenteditable="true"]',
-      ].join(", "),
-      { timeout: 600_000 } // 10 min for large files
-    );
-
-    console.log("[tiktok] Upload complete, filling caption...");
-    await waitMs(page, 3000);
-
-    // ── Fill caption ─────────────────────────────────────────
-    let caption = opts.title;
-    if (opts.description) caption += "\n\n" + opts.description;
-    if (opts.tags?.length) {
-      caption += " " + opts.tags.map((t) => `#${t}`).join(" ");
-    }
-    caption = caption.slice(0, 2200);
-
-    const editor = await page.$(
-      [
-        ".DraftEditor-root .DraftEditor-editorContainer [contenteditable]",
-        '[contenteditable="true"][data-contents]',
-        ".caption-editor [contenteditable]",
-        '[contenteditable="true"]',
-      ].join(", ")
-    );
-
-    if (editor) {
-      await editor.click();
-      await waitMs(page, 500);
-
-      // Select all + delete
-      const mod = process.platform === "darwin" ? "Meta" : "Control";
-      await page.keyboard.down(mod);
-      await page.keyboard.press("a");
-      await page.keyboard.up(mod);
-      await page.keyboard.press("Backspace");
-      await waitMs(page, 300);
-
-      await page.keyboard.type(caption, { delay: 15 });
-      console.log("[tiktok] Caption filled");
-    } else {
-      console.warn("[tiktok] Could not find caption editor");
-    }
-
-    await waitMs(page, 2000);
-
-    // ── Click Post ───────────────────────────────────────────
-    console.log("[tiktok] Looking for Post button...");
-
-    const clicked = await page.evaluate(() => {
-      const btns = Array.from(
-        document.querySelectorAll("button, [role='button']")
-      );
-      for (const label of ["Post", "发布", "Publish"]) {
-        const btn = btns.find(
-          (b) => b.textContent?.trim().toLowerCase() === label.toLowerCase()
-        );
-        if (btn) {
-          (btn as HTMLElement).click();
-          return true;
-        }
-      }
-      // Fallback: try data-e2e selector
-      const fallback = document.querySelector(
-        'button[data-e2e="post_video_button"]'
-      ) as HTMLElement | null;
-      if (fallback) {
-        fallback.click();
-        return true;
-      }
-      return false;
-    });
-
-    if (!clicked) {
-      throw new Error("找不到发布按钮");
-    }
-
-    console.log("[tiktok] Post button clicked, waiting...");
-
-    // Wait for success
-    try {
-      await page.waitForFunction(
-        () => {
-          const url = window.location.href;
-          if (!url.includes("/upload")) return true;
-          const body = document.body.innerText;
-          return (
-            body.includes("successfully") ||
-            body.includes("posted") ||
-            body.includes("发布成功")
-          );
-        },
-        { timeout: 60_000 }
-      );
-      console.log("[tiktok] Published successfully!");
-    } catch {
-      console.warn(
-        "[tiktok] Could not confirm publish — check TikTok manually"
-      );
-    }
-
-    return { publishId: `chrome-${Date.now()}` };
-  } catch (err) {
-    const msg = err instanceof Error ? err.message : String(err);
-    console.error(`[tiktok] Upload failed: ${msg}`);
-    throw err;
-  } finally {
-    // Close only our tab, disconnect from Chrome (don't close it!)
-    if (page) {
-      try {
-        await page.close();
-      } catch {
-        // Tab might already be closed
-      }
-    }
-    browser.disconnect();
+  // Build caption (title + description + hashtags)
+  let caption = opts.title;
+  if (opts.description) caption += "\n\n" + opts.description;
+  if (opts.tags?.length) {
+    caption += " " + opts.tags.map((t) => `#${t}`).join(" ");
   }
+  caption = caption.slice(0, 2200);
+
+  const directPost = opts.directPost !== false; // default true
+
+  // ── Step 1: Initialize upload ────────────────────────────
+  console.log("[tiktok] Initializing upload...");
+
+  const initResp = await apiPost<{ publish_id: string; upload_url: string }>(
+    "/post/publish/video/init/",
+    {
+      post_info: {
+        title: caption,
+        privacy_level: opts.privacyLevel ?? "SELF_ONLY",
+        disable_duet: false,
+        disable_comment: false,
+        disable_stitch: false,
+        video_cover_timestamp_ms: 1000,
+      },
+      source_info: {
+        source: "FILE_UPLOAD",
+        video_size: fileSize,
+        chunk_size: CHUNK_SIZE,
+        total_chunk_count: totalChunks,
+      },
+      ...(directPost ? { post_mode: "DIRECT_POST" } : {}),
+    },
+    token
+  );
+
+  const { publish_id: publishId, upload_url: uploadUrl } = initResp;
+  console.log(`[tiktok] publish_id: ${publishId}`);
+
+  // ── Step 2: Upload video chunks ──────────────────────────
+  await uploadChunks(uploadUrl, opts.videoFilePath, fileSize);
+  console.log("[tiktok] All chunks uploaded, waiting for processing...");
+
+  // ── Step 3: Poll for completion ──────────────────────────
+  await pollPublishStatus(publishId, token);
+
+  return { publishId };
 }
