@@ -18,6 +18,16 @@ const REDIRECT_URI = "https://content-matrix-sigma.vercel.app/auth/tiktok/callba
 export async function POST(req: NextRequest) {
   const { code } = (await req.json()) as { code?: string };
 
+  // Debug: log which credentials are being used
+  const useSandboxRuntime = process.env.TIKTOK_USE_SANDBOX === "true";
+  const clientKeyRuntime = useSandboxRuntime
+    ? (process.env.TIKTOK_SANDBOX_CLIENT_KEY ?? "")
+    : (process.env.TIKTOK_CLIENT_KEY ?? "");
+  const clientSecretRuntime = useSandboxRuntime
+    ? (process.env.TIKTOK_SANDBOX_CLIENT_SECRET ?? "")
+    : (process.env.TIKTOK_CLIENT_SECRET ?? "");
+  console.log("[tiktok/exchange] use_sandbox=", useSandboxRuntime, "client_key=", clientKeyRuntime, "secret_len=", clientSecretRuntime.length);
+
   if (!code) {
     return NextResponse.json({ error: "code is required" }, { status: 400 });
   }
@@ -30,7 +40,7 @@ export async function POST(req: NextRequest) {
     );
   }
 
-  if (!CLIENT_KEY || !CLIENT_SECRET) {
+  if (!clientKeyRuntime || !clientSecretRuntime) {
     return NextResponse.json(
       { error: "TIKTOK_CLIENT_KEY / TIKTOK_CLIENT_SECRET not configured" },
       { status: 500 }
@@ -41,8 +51,8 @@ export async function POST(req: NextRequest) {
     method: "POST",
     headers: { "Content-Type": "application/x-www-form-urlencoded" },
     body: new URLSearchParams({
-      client_key: CLIENT_KEY,
-      client_secret: CLIENT_SECRET,
+      client_key: clientKeyRuntime,
+      client_secret: clientSecretRuntime,
       code,
       grant_type: "authorization_code",
       redirect_uri: REDIRECT_URI,
@@ -62,6 +72,7 @@ export async function POST(req: NextRequest) {
   };
 
   if (data.error || !data.access_token) {
+    console.log("[tiktok/exchange] TikTok error:", data.error, data.error_description);
     return NextResponse.json(
       { error: data.error_description ?? data.error ?? "Token exchange failed" },
       { status: 400 }
