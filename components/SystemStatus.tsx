@@ -7,6 +7,7 @@ interface CheckResult {
   ffmpeg: boolean;
   openai: boolean;
   youtube: boolean;
+  tiktok: boolean;
 }
 
 const ITEM_LABELS: Record<keyof CheckResult, string> = {
@@ -14,6 +15,7 @@ const ITEM_LABELS: Record<keyof CheckResult, string> = {
   ffmpeg: "FFmpeg",
   openai: "OpenAI API Key",
   youtube: "YouTube OAuth",
+  tiktok: "TikTok",
 };
 
 export function SystemStatus() {
@@ -71,6 +73,30 @@ export function SystemStatus() {
         <p className="mt-1 text-xs text-gray-500">
           在 .env 中设置 YouTube OAuth 三个环境变量（见 README）
         </p>
+      )}
+      {!status.tiktok && (
+        <div className="mt-2 flex items-center gap-2">
+          <a
+            href="/api/auth/tiktok/start"
+            className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-black text-white text-xs rounded-lg hover:bg-gray-800 transition-colors"
+          >
+            <svg viewBox="0 0 24 24" className="w-3.5 h-3.5 fill-current">
+              <path d="M19.59 6.69a4.83 4.83 0 0 1-3.77-4.25V2h-3.45v13.67a2.89 2.89 0 0 1-2.88 2.5 2.89 2.89 0 0 1-2.89-2.89 2.89 2.89 0 0 1 2.89-2.89c.28 0 .54.04.79.1V9.01a6.33 6.33 0 0 0-.79-.05 6.34 6.34 0 0 0-6.34 6.34 6.34 6.34 0 0 0 6.34 6.34 6.34 6.34 0 0 0 6.33-6.34V8.69a8.18 8.18 0 0 0 4.78 1.52V6.76a4.85 4.85 0 0 1-1.01-.07z"/>
+            </svg>
+            连接 TikTok
+          </a>
+          <span className="text-xs text-gray-400">授权后才能发布视频到 TikTok</span>
+        </div>
+      )}
+      {status.tiktok && (
+        <div className="mt-2 flex items-center gap-2">
+          <a
+            href="/api/auth/tiktok/start"
+            className="inline-flex items-center gap-1 text-xs text-gray-400 hover:text-gray-600"
+          >
+            🔄 重新授权 TikTok
+          </a>
+        </div>
       )}
     </div>
   );

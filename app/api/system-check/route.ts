@@ -18,5 +18,6 @@ export async function GET() {
       process.env.YOUTUBE_CLIENT_SECRET &&
       process.env.YOUTUBE_REFRESH_TOKEN
     ),
+    tiktok: !!process.env.TIKTOK_ACCESS_TOKEN,
   });
 }
