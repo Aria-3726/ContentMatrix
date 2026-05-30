@@ -2,14 +2,22 @@
  * GET /api/auth/tiktok/start
  * Initiates TikTok OAuth 2.0 PKCE flow.
  * Stores the code_verifier in a cookie, then redirects to TikTok.
+ *
+ * Sandbox mode: set TIKTOK_USE_SANDBOX=true in env to use sandbox credentials
+ * and a reduced scope set (user.info.profile only).
  */
 
 import { NextResponse } from "next/server";
 import crypto from "crypto";
 
-const CLIENT_KEY = process.env.TIKTOK_CLIENT_KEY ?? "";
+const USE_SANDBOX = process.env.TIKTOK_USE_SANDBOX === "true";
+const CLIENT_KEY = USE_SANDBOX
+  ? (process.env.TIKTOK_SANDBOX_CLIENT_KEY ?? "")
+  : (process.env.TIKTOK_CLIENT_KEY ?? "");
 const REDIRECT_URI = "https://content-matrix-sigma.vercel.app/auth/tiktok/callback";
-const SCOPES = ["user.info.basic", "video.publish", "video.upload"];
+const SCOPES = USE_SANDBOX
+  ? ["user.info.profile"]
+  : ["user.info.basic", "video.publish", "video.upload"];
 
 function generateCodeVerifier(): string {
   return crypto.randomBytes(64).toString("base64url").slice(0, 128);

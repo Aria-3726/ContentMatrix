@@ -6,8 +6,13 @@
 
 import { NextRequest, NextResponse } from "next/server";
 
-const CLIENT_KEY = process.env.TIKTOK_CLIENT_KEY ?? "";
-const CLIENT_SECRET = process.env.TIKTOK_CLIENT_SECRET ?? "";
+const USE_SANDBOX = process.env.TIKTOK_USE_SANDBOX === "true";
+const CLIENT_KEY = USE_SANDBOX
+  ? (process.env.TIKTOK_SANDBOX_CLIENT_KEY ?? "")
+  : (process.env.TIKTOK_CLIENT_KEY ?? "");
+const CLIENT_SECRET = USE_SANDBOX
+  ? (process.env.TIKTOK_SANDBOX_CLIENT_SECRET ?? "")
+  : (process.env.TIKTOK_CLIENT_SECRET ?? "");
 const REDIRECT_URI = "https://content-matrix-sigma.vercel.app/auth/tiktok/callback";
 
 export async function POST(req: NextRequest) {
