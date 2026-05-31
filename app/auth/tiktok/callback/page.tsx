@@ -30,10 +30,15 @@ function CallbackContent() {
     hasFetched.current = true;
     setState("loading");
 
+    // Read the PKCE code_verifier from sessionStorage (stored by SystemStatus when
+    // the user clicked "Connect TikTok"). Fall back to undefined so the server
+    // can still try reading its cookie (legacy path).
+    const codeVerifier = sessionStorage.getItem("tiktok_cv") ?? undefined;
+
     fetch("/api/auth/tiktok/exchange", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ code }),
+      body: JSON.stringify({ code, code_verifier: codeVerifier }),
     })
       .then((r) => r.json())
       .then((data: TokenData & { error?: string }) => {
@@ -41,6 +46,8 @@ function CallbackContent() {
           setErrMsg(data.error);
           setState("error");
         } else {
+          // Clean up the stored verifier on success
+          sessionStorage.removeItem("tiktok_cv");
           setTokens(data);
           setState("done");
         }

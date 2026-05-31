@@ -1,38 +1,35 @@
 /**
  * POST /api/auth/tiktok/exchange
  * Exchanges the TikTok authorization code for tokens.
- * Reads the PKCE code_verifier from cookie.
+ * Reads the PKCE code_verifier from the request body (client-side PKCE via
+ * sessionStorage) or falls back to the tiktok_cv httpOnly cookie (legacy path).
  */
 
 import { NextRequest, NextResponse } from "next/server";
 
-const USE_SANDBOX = process.env.TIKTOK_USE_SANDBOX === "true";
-const CLIENT_KEY = USE_SANDBOX
-  ? (process.env.TIKTOK_SANDBOX_CLIENT_KEY ?? "")
-  : (process.env.TIKTOK_CLIENT_KEY ?? "");
-const CLIENT_SECRET = USE_SANDBOX
-  ? (process.env.TIKTOK_SANDBOX_CLIENT_SECRET ?? "")
-  : (process.env.TIKTOK_CLIENT_SECRET ?? "");
 const REDIRECT_URI = "https://content-matrix-sigma.vercel.app/auth/tiktok/callback";
 
 export async function POST(req: NextRequest) {
-  const { code } = (await req.json()) as { code?: string };
+  const { code, code_verifier: bodyVerifier } = (await req.json()) as {
+    code?: string;
+    code_verifier?: string;
+  };
 
-  // Debug: log which credentials are being used
-  const useSandboxRuntime = process.env.TIKTOK_USE_SANDBOX === "true";
-  const clientKeyRuntime = useSandboxRuntime
+  const useSandbox = process.env.TIKTOK_USE_SANDBOX === "true";
+  const clientKey = useSandbox
     ? (process.env.TIKTOK_SANDBOX_CLIENT_KEY ?? "")
     : (process.env.TIKTOK_CLIENT_KEY ?? "");
-  const clientSecretRuntime = useSandboxRuntime
+  const clientSecret = useSandbox
     ? (process.env.TIKTOK_SANDBOX_CLIENT_SECRET ?? "")
     : (process.env.TIKTOK_CLIENT_SECRET ?? "");
-  console.log("[tiktok/exchange] use_sandbox=", useSandboxRuntime, "client_key=", clientKeyRuntime, "secret_len=", clientSecretRuntime.length);
 
   if (!code) {
     return NextResponse.json({ error: "code is required" }, { status: 400 });
   }
 
-  const codeVerifier = req.cookies.get("tiktok_cv")?.value;
+  // Prefer code_verifier from request body (client-side PKCE via sessionStorage).
+  // Fall back to httpOnly cookie (legacy server-side PKCE path).
+  const codeVerifier = bodyVerifier ?? req.cookies.get("tiktok_cv")?.value;
   if (!codeVerifier) {
     return NextResponse.json(
       { error: "PKCE code_verifier missing — please restart the auth flow" },
@@ -40,7 +37,7 @@ export async function POST(req: NextRequest) {
     );
   }
 
-  if (!clientKeyRuntime || !clientSecretRuntime) {
+  if (!clientKey || !clientSecret) {
     return NextResponse.json(
       { error: "TIKTOK_CLIENT_KEY / TIKTOK_CLIENT_SECRET not configured" },
       { status: 500 }
@@ -51,8 +48,8 @@ export async function POST(req: NextRequest) {
     method: "POST",
     headers: { "Content-Type": "application/x-www-form-urlencoded" },
     body: new URLSearchParams({
-      client_key: clientKeyRuntime,
-      client_secret: clientSecretRuntime,
+      client_key: clientKey,
+      client_secret: clientSecret,
       code,
       grant_type: "authorization_code",
       redirect_uri: REDIRECT_URI,
@@ -72,14 +69,13 @@ export async function POST(req: NextRequest) {
   };
 
   if (data.error || !data.access_token) {
-    console.log("[tiktok/exchange] TikTok error:", data.error, data.error_description);
     return NextResponse.json(
       { error: data.error_description ?? data.error ?? "Token exchange failed" },
       { status: 400 }
     );
   }
 
-  // Clear the verifier cookie
+  // Clear the legacy verifier cookie if present
   const response = NextResponse.json({
     access_token: data.access_token,
     refresh_token: data.refresh_token,

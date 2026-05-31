@@ -7,7 +7,7 @@
  * and a reduced scope set (user.info.profile only).
  */
 
-import { NextResponse } from "next/server";
+import { NextRequest, NextResponse } from "next/server";
 import crypto from "crypto";
 
 const USE_SANDBOX = process.env.TIKTOK_USE_SANDBOX === "true";
@@ -27,7 +27,7 @@ function generateCodeChallenge(verifier: string): string {
   return crypto.createHash("sha256").update(verifier).digest("base64url");
 }
 
-export async function GET() {
+export async function GET(req: NextRequest) {
   if (!CLIENT_KEY) {
     return NextResponse.json(
       { error: "TIKTOK_CLIENT_KEY not set in environment" },
@@ -35,8 +35,22 @@ export async function GET() {
     );
   }
 
-  const codeVerifier = generateCodeVerifier();
-  const codeChallenge = generateCodeChallenge(codeVerifier);
+  // Prefer a client-supplied code_challenge (from client-side PKCE generation).
+  // Fall back to server-side generation if not provided.
+  const url = new URL(req.url);
+  const clientChallenge = url.searchParams.get("code_challenge");
+
+  let codeChallenge: string;
+  let codeVerifier: string | null = null;
+
+  if (clientChallenge) {
+    // Client generated the PKCE pair and stored the verifier in sessionStorage.
+    codeChallenge = clientChallenge;
+  } else {
+    // Fallback: server-side generation + cookie (legacy path).
+    codeVerifier = generateCodeVerifier();
+    codeChallenge = generateCodeChallenge(codeVerifier);
+  }
 
   const params = new URLSearchParams({
     client_key: CLIENT_KEY,
@@ -49,17 +63,18 @@ export async function GET() {
   });
 
   const authUrl = `https://www.tiktok.com/v2/auth/authorize/?${params.toString()}`;
-
   const response = NextResponse.redirect(authUrl);
 
-  // Store code_verifier in a short-lived httpOnly cookie
-  response.cookies.set("tiktok_cv", codeVerifier, {
-    httpOnly: true,
-    secure: true,
-    sameSite: "lax",
-    maxAge: 600, // 10 minutes
-    path: "/",
-  });
+  // Only set cookie on the legacy server-side path.
+  if (codeVerifier) {
+    response.cookies.set("tiktok_cv", codeVerifier, {
+      httpOnly: true,
+      secure: true,
+      sameSite: "lax",
+      maxAge: 600,
+      path: "/",
+    });
+  }
 
   return response;
 }

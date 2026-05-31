@@ -18,6 +18,25 @@ const ITEM_LABELS: Record<keyof CheckResult, string> = {
   tiktok: "TikTok",
 };
 
+/** Generate PKCE code_verifier + code_challenge using Web Crypto API */
+async function generatePKCE(): Promise<{ codeVerifier: string; codeChallenge: string }> {
+  const array = new Uint8Array(32);
+  crypto.getRandomValues(array);
+  const codeVerifier = btoa(String.fromCharCode(...array))
+    .replace(/\+/g, "-")
+    .replace(/\//g, "_")
+    .replace(/=/g, "");
+
+  const encoded = new TextEncoder().encode(codeVerifier);
+  const digest = await crypto.subtle.digest("SHA-256", encoded);
+  const codeChallenge = btoa(String.fromCharCode(...new Uint8Array(digest)))
+    .replace(/\+/g, "-")
+    .replace(/\//g, "_")
+    .replace(/=/g, "");
+
+  return { codeVerifier, codeChallenge };
+}
+
 export function SystemStatus() {
   const [status, setStatus] = useState<CheckResult | null>(null);
 
@@ -26,6 +45,13 @@ export function SystemStatus() {
       .then((r) => r.json())
       .then(setStatus);
   }, []);
+
+  async function handleConnectTikTok() {
+    const { codeVerifier, codeChallenge } = await generatePKCE();
+    // Store verifier in sessionStorage so the callback page can use it
+    sessionStorage.setItem("tiktok_cv", codeVerifier);
+    window.location.href = `/api/auth/tiktok/start?code_challenge=${encodeURIComponent(codeChallenge)}`;
+  }
 
   if (!status) return null;
 
@@ -76,26 +102,26 @@ export function SystemStatus() {
       )}
       {!status.tiktok && (
         <div className="mt-2 flex items-center gap-2">
-          <a
-            href="/api/auth/tiktok/start"
+          <button
+            onClick={handleConnectTikTok}
             className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-black text-white text-xs rounded-lg hover:bg-gray-800 transition-colors"
           >
             <svg viewBox="0 0 24 24" className="w-3.5 h-3.5 fill-current">
               <path d="M19.59 6.69a4.83 4.83 0 0 1-3.77-4.25V2h-3.45v13.67a2.89 2.89 0 0 1-2.88 2.5 2.89 2.89 0 0 1-2.89-2.89 2.89 2.89 0 0 1 2.89-2.89c.28 0 .54.04.79.1V9.01a6.33 6.33 0 0 0-.79-.05 6.34 6.34 0 0 0-6.34 6.34 6.34 6.34 0 0 0 6.34 6.34 6.34 6.34 0 0 0 6.33-6.34V8.69a8.18 8.18 0 0 0 4.78 1.52V6.76a4.85 4.85 0 0 1-1.01-.07z"/>
             </svg>
             连接 TikTok
-          </a>
+          </button>
           <span className="text-xs text-gray-400">授权后才能发布视频到 TikTok</span>
         </div>
       )}
       {status.tiktok && (
         <div className="mt-2 flex items-center gap-2">
-          <a
-            href="/api/auth/tiktok/start"
+          <button
+            onClick={handleConnectTikTok}
             className="inline-flex items-center gap-1 text-xs text-gray-400 hover:text-gray-600"
           >
             🔄 重新授权 TikTok
-          </a>
+          </button>
         </div>
       )}
     </div>
