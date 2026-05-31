@@ -16,7 +16,7 @@ const CLIENT_KEY = USE_SANDBOX
   : (process.env.TIKTOK_CLIENT_KEY ?? "");
 const REDIRECT_URI = "https://content-matrix-sigma.vercel.app/auth/tiktok/callback";
 const SCOPES = USE_SANDBOX
-  ? ["user.info.profile"]
+  ? ["user.info.basic", "user.info.profile", "video.publish", "video.upload"]
   : ["user.info.basic", "video.publish", "video.upload"];
 
 function generateCodeVerifier(): string {
