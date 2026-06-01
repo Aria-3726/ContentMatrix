@@ -55,7 +55,20 @@ npx tsx scripts/youtube-auth.ts
 # 4. 将输出的 YOUTUBE_REFRESH_TOKEN 粘贴到 .env
 ```
 
-### 4. TikTok OAuth2 初始配置（一次性）
+### 4. 抖音登录（一次性，搜索抖音内容必须）
+
+```bash
+# 运行登录助手（会打开真实浏览器）：
+npx tsx scripts/douyin-login.ts
+# 在浏览器中登录抖音账号，登录成功后关闭窗口
+# Session 保存到 .browser-data/douyin/，有效期约 30 天
+
+# 技术说明：抖音搜索 API 需要 a_bogus 动态签名（浏览器端 JS 计算），
+# 直接伪造无法通过校验。本方案用 Puppeteer 打开真实浏览器，
+# 抖音自己的 JS 生成签名，我们拦截 XHR 响应获取搜索结果。
+```
+
+### 5. TikTok OAuth2 初始配置（一次性）
 
 ```bash
 # 1. TikTok Developer Portal → 创建应用 → 申请 video.publish scope
@@ -68,7 +81,7 @@ npx tsx scripts/tiktok-auth.ts
 # TIKTOK_USE_SANDBOX=true  →  视频以草稿（MEDIA_UPLOAD）模式发布
 ```
 
-### 5. 启动开发服务器
+### 6. 启动开发服务器
 
 ```bash
 npm install
@@ -104,7 +117,11 @@ ContentMatrix/
 │       │       └── publish/      # YouTube + TikTok 上传
 │       └── system-check/         # 环境检查
 ├── lib/
-│   ├── scraper/bilibili.ts       # B站搜索 API（含关键词过滤）
+│   ├── scraper/
+│   │   ├── bilibili.ts           # B站搜索 API（含关键词过滤）
+│   │   ├── douyin.ts             # 抖音搜索（策略分发：浏览器优先）
+│   │   ├── douyin-browser.ts     # 抖音搜索 Puppeteer 方案（XHR 拦截）
+│   │   └── xiaohongshu.ts        # 小红书搜索
 │   ├── processor/
 │   │   ├── downloader.ts         # yt-dlp 封装
 │   │   ├── transcriber.ts        # SenseVoice 转录（带时间戳估算）
@@ -116,7 +133,8 @@ ContentMatrix/
 ├── prisma/schema.prisma          # 数据库 Schema（SQLite）
 └── scripts/
     ├── youtube-auth.ts           # YouTube OAuth2 初始化
-    └── tiktok-auth.ts            # TikTok OAuth2 初始化
+    ├── tiktok-auth.ts            # TikTok OAuth2 初始化
+    └── douyin-login.ts           # 抖音一次性登录（保存浏览器 Session）
 ```
 
 ---

@@ -1,11 +1,18 @@
 /**
- * Douyin (抖音) content scraper — fetches the Douyin web search page and
- * extracts SSR-rendered results from the embedded RENDER_DATA script tag.
+ * Douyin (抖音) content scraper
  *
- * Requires DOUYIN_COOKIE env var set from a logged-in browser session.
- * Cookie 获取方法:
- *   1. 浏览器打开 douyin.com 并登录
- *   2. F12 → Network → 刷新 → 复制任意请求的 Cookie header
+ * 搜索策略（按优先级）：
+ *   1. Puppeteer 浏览器方案（主力，最可靠）
+ *      原理：打开真实浏览器，拦截 XHR 响应，a_bogus 由抖音自己的 JS 生成。
+ *      前置：运行 `npx tsx scripts/douyin-login.ts` 完成一次性登录。
+ *      实现：lib/scraper/douyin-browser.ts
+ *
+ *   2. SSR 页面提取（降级，需 DOUYIN_COOKIE 环境变量）
+ *      原理：抓取搜索页 HTML 提取 RENDER_DATA 内嵌 JSON。
+ *      注意：抖音搜索结果通常通过 XHR 加载，SSR 数据可能为空。
+ *
+ *   3. 直接 API 调用（降级，需 DOUYIN_COOKIE，可能因 a_bogus 缺失失败）
+ *      原理：直接调用 /aweme/v1/web/search/item/ 接口。
  */
 
 import type { ScraperResult } from "@/lib/db/types";
@@ -261,7 +268,11 @@ async function fetchAPISearchData(
 
 /**
  * Search Douyin for videos matching the given keyword.
- * Tries SSR extraction first, falls back to direct API call.
+ *
+ * Priority:
+ *   1. Puppeteer browser (XHR interception) — most reliable, handles a_bogus
+ *   2. SSR page extraction — fallback if no browser session
+ *   3. Direct API call — last resort, may fail without a_bogus
  */
 export async function searchDouyin(
   opts: DouyinSearchOptions
@@ -271,36 +282,53 @@ export async function searchDouyin(
     page = 1,
     pageSize = 20,
     minViews = 5000,
-    minDuration = 10,  // Douyin videos are shorter
+    minDuration = 10,
     maxDuration = 600,
   } = opts;
 
+  // ── Strategy 1: Browser-based (most reliable) ────────────
+  try {
+    const { searchDouyinBrowser } = await import("./douyin-browser");
+    const results = await searchDouyinBrowser({
+      keyword,
+      minViews,
+      minDuration,
+      maxDuration,
+    });
+    if (results.length > 0) return results;
+    console.warn("[douyin] 浏览器方案返回 0 条结果，尝试降级方案...");
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    // "未找到登录会话" → 引导用户登录，不继续降级
+    if (msg.includes("npx tsx scripts/douyin-login.ts")) {
+      // 如果有 cookie 降级，继续；否则抛出
+      if (!process.env.DOUYIN_COOKIE) throw err as Error;
+    }
+    console.warn("[douyin] 浏览器方案失败，尝试 Cookie 降级:", msg.split("\n")[0]);
+  }
+
+  // ── Strategy 2 & 3: Cookie-based fallback ────────────────
   let awemes: DouyinAweme[] = [];
   let lastError: Error | null = null;
 
-  // Strategy 1: SSR page extraction
   try {
     awemes = await fetchSSRSearchData(keyword, page);
   } catch (err) {
     lastError = err instanceof Error ? err : new Error(String(err));
-    console.warn("[douyin] SSR extraction failed:", lastError.message);
+    console.warn("[douyin] SSR 提取失败:", lastError.message.split("\n")[0]);
   }
 
-  // Strategy 2: Direct API (may fail without a_bogus)
   if (awemes.length === 0) {
     try {
       awemes = await fetchAPISearchData(keyword, page, pageSize);
     } catch (err) {
       const apiErr = err instanceof Error ? err : new Error(String(err));
-      console.warn("[douyin] API fallback failed:", apiErr.message);
-
-      // If both strategies failed, throw the most helpful error
+      console.warn("[douyin] API 降级失败:", apiErr.message.split("\n")[0]);
       if (lastError) throw lastError;
       throw apiErr;
     }
   }
 
-  // Filter and map to ScraperResult
   return awemes
     .filter((v) => {
       const durationSec = Math.floor((v.video?.duration ?? 0) / 1000);
