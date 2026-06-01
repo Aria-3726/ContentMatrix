@@ -26,6 +26,17 @@ export const DOUYIN_BROWSER_DATA_DIR = path.join(
   "douyin"
 );
 
+/** 优先使用系统 Chrome（内置 Chromium 在 macOS 上对部分站点有网络兼容问题） */
+function findChromePath(): string | undefined {
+  const candidates = [
+    "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+    "/Applications/Chromium.app/Contents/MacOS/Chromium",
+    "/usr/bin/google-chrome",
+    "/usr/bin/chromium-browser",
+  ];
+  return candidates.find((p) => fs.existsSync(p));
+}
+
 const USER_AGENT =
   "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 " +
   "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36";
@@ -105,8 +116,14 @@ export async function searchDouyinBrowser(
     try { fs.unlinkSync(lockFile); } catch { /* ignore */ }
   }
 
+  const chromePath = findChromePath();
+  if (chromePath) {
+    console.log(`[douyin-browser] 使用系统 Chrome: ${chromePath}`);
+  }
+
   const browser = await puppeteer.launch({
     headless: true,
+    executablePath: chromePath,   // undefined → 使用内置 Chromium
     userDataDir: DOUYIN_BROWSER_DATA_DIR,
     defaultViewport: { width: 1280, height: 900 },
     args: [
