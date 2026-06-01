@@ -269,10 +269,10 @@ async function fetchAPISearchData(
 /**
  * Search Douyin for videos matching the given keyword.
  *
- * Priority:
- *   1. Puppeteer browser (XHR interception) — most reliable, handles a_bogus
- *   2. SSR page extraction — fallback if no browser session
- *   3. Direct API call — last resort, may fail without a_bogus
+ * Strategy selection:
+ *   - Browser session exists (.browser-data/douyin/) → 浏览器方案（子进程 Chrome）
+ *   - No browser session, DOUYIN_COOKIE set → Cookie 降级方案
+ *   - Neither → 引导用户运行 douyin-login.ts
  */
 export async function searchDouyin(
   opts: DouyinSearchOptions
@@ -286,25 +286,21 @@ export async function searchDouyin(
     maxDuration = 600,
   } = opts;
 
-  // ── Strategy 1: Browser-based (most reliable) ────────────
-  try {
-    const { searchDouyinBrowser } = await import("./douyin-browser");
-    const results = await searchDouyinBrowser({
-      keyword,
-      minViews,
-      minDuration,
-      maxDuration,
-    });
-    if (results.length > 0) return results;
-    console.warn("[douyin] 浏览器方案返回 0 条结果，尝试降级方案...");
-  } catch (err) {
-    const msg = err instanceof Error ? err.message : String(err);
-    // "未找到登录会话" → 引导用户登录，不继续降级
-    if (msg.includes("npx tsx scripts/douyin-login.ts")) {
-      // 如果有 cookie 降级，继续；否则抛出
-      if (!process.env.DOUYIN_COOKIE) throw err as Error;
-    }
-    console.warn("[douyin] 浏览器方案失败，尝试 Cookie 降级:", msg.split("\n")[0]);
+  // ── Strategy 1: Browser session（首选，不可静默降级到 cookie）──
+  const { sessionExists, searchDouyinBrowser } = await import("./douyin-browser");
+  if (sessionExists()) {
+    // 有 session → 只用浏览器方案；任何错误都直接抛出，不降级
+    return searchDouyinBrowser({ keyword, minViews, minDuration, maxDuration });
+  }
+
+  // ── No browser session → cookie fallback（或引导登录）────────
+  if (!process.env.DOUYIN_COOKIE) {
+    throw new Error(
+      "未找到抖音登录会话，请先运行：\n\n" +
+      "  npx tsx scripts/douyin-login.ts\n\n" +
+      "在打开的浏览器中登录抖音账号，然后关闭窗口。\n" +
+      "登录状态保存到 .browser-data/douyin/，后续搜索自动使用，无需重复登录。"
+    );
   }
 
   // ── Strategy 2 & 3: Cookie-based fallback ────────────────
