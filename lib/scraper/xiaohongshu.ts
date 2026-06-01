@@ -291,78 +291,132 @@ function extractNotesFromState(
   return items;
 }
 
+// ── Session check ─────────────────────────────────────────────
+
+const XHS_BROWSER_DATA_DIR = path.join(
+  process.cwd(),
+  ".browser-data",
+  "xiaohongshu"
+);
+
+export function xhsSessionExists(): boolean {
+  return fs.existsSync(
+    path.join(XHS_BROWSER_DATA_DIR, "Default", "Cookies")
+  );
+}
+
+// ── Subprocess helper ─────────────────────────────────────────
+
+import { execFile } from "child_process";
+import path from "path";
+import fs from "fs";
+
+async function searchViaSubprocess(
+  opts: XhsSearchOptions
+): Promise<ScraperResult[]> {
+  const tsxBin = path.join(process.cwd(), "node_modules", ".bin", "tsx");
+  const scriptPath = path.join(process.cwd(), "scripts", "xiaohongshu-search.ts");
+
+  const stdout = await new Promise<string>((resolve, reject) => {
+    const child = execFile(
+      tsxBin,
+      [scriptPath, JSON.stringify({ keyword: opts.keyword, minLikes: opts.minLikes ?? 100 })],
+      {
+        timeout: 55_000,
+        maxBuffer: 5 * 1024 * 1024,
+        env: {
+          ...process.env,
+          PATH: `/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:${process.env.PATH ?? ""}`,
+        },
+      },
+      (err, out, stderr) => {
+        if (err) {
+          reject(new Error(`[xhs-search] 子进程失败: ${(stderr ?? err.message).split("\n")[0]}`));
+        } else {
+          resolve(out);
+        }
+      }
+    );
+    child.stderr?.on("data", (d: Buffer) => process.stderr.write(d));
+  });
+
+  let parsed: { ok: true; data: ScraperResult[] } | { ok: false; error: string };
+  try {
+    parsed = JSON.parse(stdout);
+  } catch {
+    throw new Error(`[xhs-search] 输出解析失败: ${stdout.slice(0, 200)}`);
+  }
+  if (!parsed.ok) throw new Error(parsed.error);
+  return parsed.data;
+}
+
 // ── Main export ──────────────────────────────────────────────
 
 /**
  * Search Xiaohongshu for notes matching the given keyword.
  *
  * Strategy:
- *   1. Puppeteer browser (handles signatures automatically)
- *   2. SSR __INITIAL_STATE__ extraction (fallback)
+ *   - Browser session exists (.browser-data/xiaohongshu/) → 子进程方案（stealth + 随机延迟）
+ *   - No session, XIAOHONGSHU_COOKIE set → Cookie 注入降级方案
+ *   - Neither → 引导用户运行 xiaohongshu-login.ts
  */
 export async function searchXiaohongshu(
   opts: XhsSearchOptions
 ): Promise<ScraperResult[]> {
   const { keyword, minLikes = 100 } = opts;
 
+  // ── Strategy 1: 子进程浏览器方案（首选）────────────────────
+  if (xhsSessionExists()) {
+    return searchViaSubprocess(opts);
+  }
+
+  // ── No session → cookie fallback or helpful error ──────────
   const cookieStr = process.env.XIAOHONGSHU_COOKIE;
   if (!cookieStr) {
     throw new Error(
-      "需要设置 XIAOHONGSHU_COOKIE 环境变量才能搜索小红书内容。\n" +
-        "获取方法：浏览器登录 xiaohongshu.com → F12 → Network → 复制 Cookie"
+      "未找到小红书登录会话，请先运行：\n\n" +
+      "  npx tsx scripts/xiaohongshu-login.ts\n\n" +
+      "⚠️  请使用专用小号，不要用主账号！\n" +
+      "在打开的浏览器中登录小红书，然后关闭窗口。\n" +
+      "登录状态保存到 .browser-data/xiaohongshu/，后续搜索自动使用。"
     );
   }
 
+  // ── Strategy 2 & 3: Cookie 降级 ────────────────────────────
   let items: XhsSearchItem[] = [];
 
-  // Strategy 1: Puppeteer browser search
   try {
     items = await searchWithBrowser(keyword, cookieStr);
   } catch (err) {
-    console.warn(
-      "[xiaohongshu] Browser search failed:",
-      err instanceof Error ? err.message : err
-    );
+    console.warn("[xiaohongshu] Cookie browser search failed:", err instanceof Error ? err.message : err);
   }
 
-  // Strategy 2: SSR fallback
   if (items.length === 0) {
     try {
       items = await searchFromSSR(keyword, cookieStr);
     } catch (err) {
-      console.warn(
-        "[xiaohongshu] SSR extraction failed:",
-        err instanceof Error ? err.message : err
-      );
+      console.warn("[xiaohongshu] SSR fallback failed:", err instanceof Error ? err.message : err);
     }
   }
 
   if (items.length === 0) {
     throw new Error(
-      "小红书搜索未返回结果。可能原因：Cookie 已过期或被限流。\n" +
-        "请在浏览器中重新登录 xiaohongshu.com 并更新 XIAOHONGSHU_COOKIE"
+      "小红书搜索未返回结果。Cookie 可能已过期。\n" +
+      "建议改用会话方案：npx tsx scripts/xiaohongshu-login.ts"
     );
   }
 
-  // Map to ScraperResult
   return items
     .filter((item) => {
       if (!item.id || !item.note_card) return false;
-      const likes = parseLikeCount(item.note_card.interact_info?.liked_count);
-      if (likes < minLikes) return false;
-      return true;
+      return parseLikeCount(item.note_card.interact_info?.liked_count) >= minLikes;
     })
     .map((item) => {
       const card = item.note_card!;
       const isVideo = card.type === "video";
-      const likes = parseLikeCount(card.interact_info?.liked_count);
-      const durationSec = isVideo ? (card.video?.duration ?? 0) : 0;
-
-      // XHS requires xsec_token in URL to view notes found via search
       const xsecParam = item.xsec_token
         ? `?xsec_token=${encodeURIComponent(item.xsec_token)}&xsec_source=pc_search`
         : "";
-
       return {
         platform: "XIAOHONGSHU",
         sourceId: item.id!,
@@ -371,14 +425,12 @@ export async function searchXiaohongshu(
         title: card.display_title ?? "",
         description: card.desc ?? card.display_title ?? "",
         thumbnail: getCoverUrl(card),
-        duration: durationSec,
+        duration: isVideo ? (card.video?.duration ?? 0) : 0,
         viewCount: 0,
-        likeCount: likes,
+        likeCount: parseLikeCount(card.interact_info?.liked_count),
         authorName: card.user?.nickname ?? "",
         authorId: card.user?.user_id ?? "",
-        publishedAt: card.time
-          ? new Date(card.time * 1000).toISOString()
-          : new Date().toISOString(),
+        publishedAt: card.time ? new Date(card.time * 1000).toISOString() : new Date().toISOString(),
       };
     });
 }

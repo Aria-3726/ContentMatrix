@@ -3,14 +3,17 @@
  *
  * 由 lib/scraper/douyin-browser.ts 的 searchDouyinBrowser() 通过 execFile 调用。
  * argv[2] = JSON 序列化的 DouyinBrowserSearchOptions
- * 成功: 向 stdout 输出 { ok: true, data: ScraperResult[] }
- * 失败: 向 stdout 输出 { ok: false, error: string }，exit code 1
+ * stdout  = { ok: true, data: ScraperResult[] } | { ok: false, error: string }
  *
- * 不要直接运行此脚本，请用 searchDouyinBrowser() 调用。
- * 如需调试，使用: npx tsx scripts/debug-douyin.ts
+ * 反检测措施：
+ *   - puppeteer-extra-plugin-stealth（覆盖 40+ 个指纹检测点）
+ *   - 优先使用系统 Chrome（fingerprint 与真实用户一致）
+ *   - 持久化 userDataDir（profile 有历史记录，更像真实用户）
+ *   - 随机延迟模拟人类操作节奏
  */
 
-import puppeteer from "puppeteer";
+import puppeteerExtra from "puppeteer-extra";
+import StealthPlugin from "puppeteer-extra-plugin-stealth";
 import { execFileSync } from "child_process";
 import path from "path";
 import fs from "fs";
@@ -18,8 +21,16 @@ import type { ScraperResult } from "@/lib/db/types";
 import {
   DOUYIN_BROWSER_DATA_DIR,
   findChromePath,
-  DouyinBrowserSearchOptions,
+  type DouyinBrowserSearchOptions,
 } from "@/lib/scraper/douyin-browser";
+
+puppeteerExtra.use(StealthPlugin());
+
+// ── 工具函数 ──────────────────────────────────────────────────
+
+/** 随机延迟，模拟人类操作节奏 */
+const randomSleep = (minMs = 800, maxMs = 2500) =>
+  new Promise((r) => setTimeout(r, minMs + Math.random() * (maxMs - minMs)));
 
 // ── 内部类型 ──────────────────────────────────────────────────
 
@@ -56,15 +67,15 @@ async function runSearch(opts: DouyinBrowserSearchOptions): Promise<ScraperResul
   // 清理残留进程和锁文件
   try {
     execFileSync("pkill", ["-f", DOUYIN_BROWSER_DATA_DIR], { stdio: "ignore" });
-  } catch { /* 没有匹配进程时 pkill 返回 1，忽略 */ }
+  } catch { /* pkill 无匹配时退出码 1，忽略 */ }
   const lockFile = path.join(DOUYIN_BROWSER_DATA_DIR, "SingletonLock");
   if (fs.existsSync(lockFile)) { try { fs.unlinkSync(lockFile); } catch { /**/ } }
-  await new Promise((r) => setTimeout(r, 800));
+  await randomSleep(800, 1200); // 给系统时间完成进程清理
 
   const chromePath = findChromePath();
   if (chromePath) process.stderr.write(`[douyin-search] 使用系统 Chrome: ${chromePath}\n`);
 
-  const browser = await puppeteer.launch({
+  const browser = await puppeteerExtra.launch({
     headless: true,
     executablePath: chromePath,
     userDataDir: DOUYIN_BROWSER_DATA_DIR,
@@ -72,7 +83,6 @@ async function runSearch(opts: DouyinBrowserSearchOptions): Promise<ScraperResul
     args: [
       "--no-sandbox",
       "--disable-setuid-sandbox",
-      "--disable-blink-features=AutomationControlled",
       "--disable-features=VizDisplayCompositor",
       "--disable-dev-shm-usage",
     ],
@@ -84,9 +94,6 @@ async function runSearch(opts: DouyinBrowserSearchOptions): Promise<ScraperResul
       "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 " +
       "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
     );
-    await page.evaluateOnNewDocument(() => {
-      Object.defineProperty(navigator, "webdriver", { get: () => false });
-    });
 
     const awemes: DouyinAweme[] = [];
 
@@ -120,7 +127,12 @@ async function runSearch(opts: DouyinBrowserSearchOptions): Promise<ScraperResul
     process.stderr.write(`[douyin-search] 导航: ${searchUrl}\n`);
 
     await page.goto(searchUrl, { waitUntil: "domcontentloaded", timeout: timeoutMs });
-    await page.evaluate(() => window.scrollBy(0, 500));
+
+    // 随机延迟后滚动，模拟人类阅读行为
+    await randomSleep(1200, 2500);
+    await page.evaluate(() => window.scrollBy(0, 300 + Math.random() * 400));
+    await randomSleep(500, 1000);
+
     await xhrReady;
 
     return awemes
@@ -128,7 +140,6 @@ async function runSearch(opts: DouyinBrowserSearchOptions): Promise<ScraperResul
         if (!v.aweme_id) return false;
         const durSec = Math.floor((v.video?.duration ?? 0) / 1000);
         if (durSec < minDuration || durSec > maxDuration) return false;
-        // 抖音搜索 API 不含播放量，play_count=0 时跳过该过滤
         const pc = v.statistics?.play_count ?? 0;
         if (pc > 0 && pc < minViews) return false;
         return true;
@@ -158,7 +169,7 @@ async function runSearch(opts: DouyinBrowserSearchOptions): Promise<ScraperResul
   }
 }
 
-// ── 入口：解析参数、运行、输出 JSON ──────────────────────────
+// ── 入口 ──────────────────────────────────────────────────────
 
 (async () => {
   const raw = process.argv[2];
@@ -166,16 +177,8 @@ async function runSearch(opts: DouyinBrowserSearchOptions): Promise<ScraperResul
     process.stdout.write(JSON.stringify({ ok: false, error: "缺少参数" }));
     process.exit(1);
   }
-
-  let opts: DouyinBrowserSearchOptions;
   try {
-    opts = JSON.parse(raw) as DouyinBrowserSearchOptions;
-  } catch {
-    process.stdout.write(JSON.stringify({ ok: false, error: "参数 JSON 解析失败" }));
-    process.exit(1);
-  }
-
-  try {
+    const opts = JSON.parse(raw) as DouyinBrowserSearchOptions;
     const data = await runSearch(opts);
     process.stdout.write(JSON.stringify({ ok: true, data }));
   } catch (err) {
