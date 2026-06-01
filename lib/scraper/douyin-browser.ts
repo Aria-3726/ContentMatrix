@@ -110,11 +110,15 @@ export async function searchDouyinBrowser(
 
   assertSessionExists();
 
-  // 清理可能遗留的 SingletonLock（多进程场景）
+  // 清理可能遗留的浏览器进程和 SingletonLock
+  const { execSync } = await import("child_process");
+  try { execSync(`pkill -f "${DOUYIN_BROWSER_DATA_DIR}" 2>/dev/null || true`); } catch { /* ignore */ }
   const lockFile = path.join(DOUYIN_BROWSER_DATA_DIR, "SingletonLock");
   if (fs.existsSync(lockFile)) {
     try { fs.unlinkSync(lockFile); } catch { /* ignore */ }
   }
+  // 给系统一点时间完成进程清理
+  await new Promise((r) => setTimeout(r, 500));
 
   const chromePath = findChromePath();
   if (chromePath) {
@@ -201,10 +205,12 @@ export async function searchDouyinBrowser(
     // ── 过滤 + 映射 ────────────────────────────────────────
     return awemes
       .filter((v) => {
+        if (!v.aweme_id) return false;
         const durSec = Math.floor((v.video?.duration ?? 0) / 1000);
         if (durSec < minDuration || durSec > maxDuration) return false;
-        if ((v.statistics?.play_count ?? 0) < minViews) return false;
-        if (!v.aweme_id) return false;
+        // 抖音搜索 API 不返回播放量，play_count 为 0 时跳过该过滤
+        const playCount = v.statistics?.play_count ?? 0;
+        if (playCount > 0 && playCount < minViews) return false;
         return true;
       })
       .map((v) => {

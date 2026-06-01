@@ -333,7 +333,9 @@ export async function searchDouyin(
     .filter((v) => {
       const durationSec = Math.floor((v.video?.duration ?? 0) / 1000);
       if (durationSec < minDuration || durationSec > maxDuration) return false;
-      if ((v.statistics?.play_count ?? 0) < minViews) return false;
+      // 抖音搜索 API 不返回播放量，play_count 为 0 时跳过该过滤
+      const playCount = v.statistics?.play_count ?? 0;
+      if (playCount > 0 && playCount < minViews) return false;
       return true;
     })
     .map((v) => {
