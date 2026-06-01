@@ -27,6 +27,16 @@ export interface TikTokUploadOptions {
   tags?: string[];
   /** "PUBLIC_TO_EVERYONE" | "FOLLOWER_OF_CREATOR" | "MUTUAL_FOLLOW_FRIENDS" | "SELF_ONLY" */
   privacyLevel?: string;
+  /** Allow viewers to comment. Default false. */
+  allowComment?: boolean;
+  /** Allow duet. Default false. */
+  allowDuet?: boolean;
+  /** Allow stitch. Default false. */
+  allowStitch?: boolean;
+  /** Commercial disclosure: is this branded content? */
+  brandedContent?: boolean;
+  /** Commercial disclosure: is this your own brand promotion? */
+  yourBrand?: boolean;
   /** If true, publishes directly (requires video.publish scope). Defaults to true. */
   directPost?: boolean;
 }
@@ -39,8 +49,13 @@ export interface TikTokUploadResult {
 
 async function refreshAccessToken(): Promise<string> {
   const refreshToken = process.env.TIKTOK_REFRESH_TOKEN;
-  const clientKey = process.env.TIKTOK_CLIENT_KEY;
-  const clientSecret = process.env.TIKTOK_CLIENT_SECRET;
+  const useSandbox = process.env.TIKTOK_USE_SANDBOX === "true";
+  const clientKey = useSandbox
+    ? (process.env.TIKTOK_SANDBOX_CLIENT_KEY ?? process.env.TIKTOK_CLIENT_KEY)
+    : process.env.TIKTOK_CLIENT_KEY;
+  const clientSecret = useSandbox
+    ? (process.env.TIKTOK_SANDBOX_CLIENT_SECRET ?? process.env.TIKTOK_CLIENT_SECRET)
+    : process.env.TIKTOK_CLIENT_SECRET;
 
   if (!refreshToken || !clientKey || !clientSecret) {
     throw new Error(
@@ -118,22 +133,23 @@ async function apiPost<T>(
 async function uploadChunks(
   uploadUrl: string,
   filePath: string,
-  fileSize: number
+  fileSize: number,
+  chunkSize: number = CHUNK_SIZE
 ): Promise<void> {
-  const totalChunks = Math.ceil(fileSize / CHUNK_SIZE);
+  const totalChunks = Math.ceil(fileSize / chunkSize);
   const fd = fs.openSync(filePath, "r");
 
   try {
     for (let i = 0; i < totalChunks; i++) {
-      const start = i * CHUNK_SIZE;
-      const end = Math.min(start + CHUNK_SIZE, fileSize) - 1;
-      const chunkSize = end - start + 1;
+      const start = i * chunkSize;
+      const end = Math.min(start + chunkSize, fileSize) - 1;
+      const thisChunkBytes = end - start + 1;
 
-      const buffer = Buffer.alloc(chunkSize);
-      fs.readSync(fd, buffer, 0, chunkSize, start);
+      const buffer = Buffer.alloc(thisChunkBytes);
+      fs.readSync(fd, buffer, 0, thisChunkBytes, start);
 
       console.log(
-        `[tiktok] Uploading chunk ${i + 1}/${totalChunks} (${(chunkSize / 1024 / 1024).toFixed(1)} MB)...`
+        `[tiktok] Uploading chunk ${i + 1}/${totalChunks} (${(thisChunkBytes / 1024 / 1024).toFixed(1)} MB)...`
       );
 
       const putResp = await fetch(uploadUrl, {
@@ -141,7 +157,7 @@ async function uploadChunks(
         headers: {
           "Content-Range": `bytes ${start}-${end}/${fileSize}`,
           "Content-Type": "video/mp4",
-          "Content-Length": String(chunkSize),
+          "Content-Length": String(thisChunkBytes),
         },
         body: buffer,
       });
@@ -225,7 +241,9 @@ export async function uploadToTikTok(
   );
 
   const token = await getAccessToken();
-  const totalChunks = Math.ceil(fileSize / CHUNK_SIZE);
+  // TikTok requires chunk_size == video_size when the file fits in one chunk
+  const effectiveChunkSize = fileSize <= CHUNK_SIZE ? fileSize : CHUNK_SIZE;
+  const totalChunks = Math.ceil(fileSize / effectiveChunkSize);
 
   // Build caption (title + description + hashtags)
   let caption = opts.title;
@@ -237,6 +255,33 @@ export async function uploadToTikTok(
 
   const directPost = opts.directPost !== false; // default true
 
+  // ── Step 0: Query creator info (required by TikTok) ──────
+  console.log("[tiktok] Querying creator info...");
+  let privacyLevel = opts.privacyLevel ?? "SELF_ONLY";
+  try {
+    const creatorInfo = await apiPost<{
+      creator_avatar_url?: string;
+      creator_username?: string;
+      creator_nickname?: string;
+      privacy_level_options?: string[];
+      comment_disabled?: boolean;
+      duet_disabled?: boolean;
+      stitch_disabled?: boolean;
+      max_video_post_duration_sec?: number;
+    }>("/post/publish/creator_info/query/", {}, token);
+    console.log("[tiktok] Creator info:", JSON.stringify(creatorInfo));
+    // Use first available privacy level option (prefer SELF_ONLY)
+    if (creatorInfo.privacy_level_options?.length) {
+      if (!creatorInfo.privacy_level_options.includes(privacyLevel)) {
+        privacyLevel = creatorInfo.privacy_level_options[0];
+        console.log(`[tiktok] privacy_level adjusted to: ${privacyLevel}`);
+      }
+    }
+  } catch (err) {
+    console.warn("[tiktok] creator_info query failed:", err instanceof Error ? err.message : err);
+    // non-fatal — proceed with default privacy level
+  }
+
   // ── Step 1: Initialize upload ────────────────────────────
   console.log("[tiktok] Initializing upload...");
 
@@ -245,16 +290,22 @@ export async function uploadToTikTok(
     {
       post_info: {
         title: caption,
-        privacy_level: opts.privacyLevel ?? "SELF_ONLY",
-        disable_duet: false,
-        disable_comment: false,
-        disable_stitch: false,
+        privacy_level: privacyLevel,
+        disable_comment: !(opts.allowComment ?? false),
+        disable_duet: !(opts.allowDuet ?? false),
+        disable_stitch: !(opts.allowStitch ?? false),
         video_cover_timestamp_ms: 1000,
+        ...(opts.brandedContent || opts.yourBrand
+          ? {
+              brand_content_toggle: opts.brandedContent ?? false,
+              brand_organic_toggle: opts.yourBrand ?? false,
+            }
+          : {}),
       },
       source_info: {
         source: "FILE_UPLOAD",
         video_size: fileSize,
-        chunk_size: CHUNK_SIZE,
+        chunk_size: effectiveChunkSize,
         total_chunk_count: totalChunks,
       },
       ...(directPost ? { post_mode: "DIRECT_POST" } : {}),
@@ -266,7 +317,7 @@ export async function uploadToTikTok(
   console.log(`[tiktok] publish_id: ${publishId}`);
 
   // ── Step 2: Upload video chunks ──────────────────────────
-  await uploadChunks(uploadUrl, opts.videoFilePath, fileSize);
+  await uploadChunks(uploadUrl, opts.videoFilePath, fileSize, effectiveChunkSize);
   console.log("[tiktok] All chunks uploaded, waiting for processing...");
 
   // ── Step 3: Poll for completion ──────────────────────────

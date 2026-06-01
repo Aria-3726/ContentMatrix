@@ -4,6 +4,17 @@ import { useEffect, useState, use, useCallback } from "react";
 import { StatusBadge } from "@/components/StatusBadge";
 import type { SubtitleSegment } from "@/lib/db/types";
 
+interface TikTokCreatorInfo {
+  creator_nickname?: string;
+  creator_username?: string;
+  creator_avatar_url?: string;
+  privacy_level_options?: string[];
+  comment_disabled?: boolean;
+  duet_disabled?: boolean;
+  stitch_disabled?: boolean;
+  max_video_post_duration_sec?: number;
+}
+
 interface Job {
   id: string;
   platform: string;
@@ -61,6 +72,17 @@ export default function ReviewPage({
   });
   const [toast, setToast] = useState<string | null>(null);
 
+  // TikTok posting options (mandatory per Content Sharing Guidelines)
+  const [tiktokCreatorInfo, setTiktokCreatorInfo] = useState<TikTokCreatorInfo | null>(null);
+  const [tiktokCreatorLoading, setTiktokCreatorLoading] = useState(false);
+  const [tiktokPrivacyLevel, setTiktokPrivacyLevel] = useState("");
+  const [tiktokAllowComment, setTiktokAllowComment] = useState(false);
+  const [tiktokAllowDuet, setTiktokAllowDuet] = useState(false);
+  const [tiktokAllowStitch, setTiktokAllowStitch] = useState(false);
+  const [tiktokCommercial, setTiktokCommercial] = useState(false);
+  const [tiktokBrandedContent, setTiktokBrandedContent] = useState(false);
+  const [tiktokYourBrand, setTiktokYourBrand] = useState(false);
+
   const [editTitle, setEditTitle] = useState("");
   const [editDesc, setEditDesc] = useState("");
   const [editTags, setEditTags] = useState("");
@@ -92,6 +114,30 @@ export default function ReviewPage({
   useEffect(() => {
     fetchJob();
   }, [fetchJob]);
+
+  // Fetch TikTok creator info when TikTok target is selected
+  const fetchTiktokCreatorInfo = async () => {
+    if (tiktokCreatorInfo || tiktokCreatorLoading) return;
+    setTiktokCreatorLoading(true);
+    try {
+      const res = await fetch("/api/tiktok/creator-info");
+      const data = (await res.json()) as {
+        data?: TikTokCreatorInfo;
+        error?: string;
+      };
+      if (data.data) {
+        setTiktokCreatorInfo(data.data);
+        // Set default privacy level to first available option
+        if (data.data.privacy_level_options?.length) {
+          setTiktokPrivacyLevel(data.data.privacy_level_options[0]);
+        }
+      }
+    } catch {
+      // non-fatal
+    } finally {
+      setTiktokCreatorLoading(false);
+    }
+  };
 
   // Try loading existing thumbnail
   useEffect(() => {
@@ -134,13 +180,29 @@ export default function ReviewPage({
       showToast("请至少选择一个发布平台");
       return;
     }
+    if (targets.includes("TIKTOK") && !tiktokPrivacyLevel) {
+      showToast("请选择 TikTok 隐私设置");
+      return;
+    }
     await handleSave();
     setPublishing(true);
     try {
       const res = await fetch(`/api/jobs/${id}/publish`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ targets }),
+        body: JSON.stringify({
+          targets,
+          tiktokOptions: targets.includes("TIKTOK")
+            ? {
+                privacyLevel: tiktokPrivacyLevel,
+                allowComment: tiktokAllowComment,
+                allowDuet: tiktokAllowDuet,
+                allowStitch: tiktokAllowStitch,
+                brandedContent: tiktokBrandedContent,
+                yourBrand: tiktokYourBrand,
+              }
+            : undefined,
+        }),
       });
       const data = (await res.json()) as { message?: string; error?: string };
       if (!res.ok) throw new Error(data.error ?? "发布失败");
@@ -498,14 +560,207 @@ export default function ReviewPage({
                   <input
                     type="checkbox"
                     checked={publishTargets.TIKTOK}
-                    onChange={(e) =>
-                      setPublishTargets((p) => ({ ...p, TIKTOK: e.target.checked }))
-                    }
+                    onChange={(e) => {
+                      setPublishTargets((p) => ({ ...p, TIKTOK: e.target.checked }));
+                      if (e.target.checked) fetchTiktokCreatorInfo();
+                    }}
                     className="rounded border-gray-300 text-blue-600 focus:ring-blue-500"
                   />
                   <span className="text-gray-700">TikTok</span>
                 </label>
               </div>
+
+              {/* ── TikTok settings panel ─────────────────────── */}
+              {publishTargets.TIKTOK && (
+                <div className="mt-3 border border-gray-100 rounded-xl bg-gray-50 p-4 space-y-4 text-sm">
+                  {/* Creator info */}
+                  <div className="flex items-center gap-3">
+                    {tiktokCreatorInfo?.creator_avatar_url && (
+                      // eslint-disable-next-line @next/next/no-img-element
+                      <img
+                        src={tiktokCreatorInfo.creator_avatar_url}
+                        alt="avatar"
+                        className="w-9 h-9 rounded-full object-cover bg-gray-200"
+                      />
+                    )}
+                    {tiktokCreatorLoading ? (
+                      <span className="text-gray-400 text-xs">正在获取账号信息…</span>
+                    ) : tiktokCreatorInfo ? (
+                      <div>
+                        <p className="font-medium text-gray-800 leading-tight">
+                          {tiktokCreatorInfo.creator_nickname ?? tiktokCreatorInfo.creator_username ?? "—"}
+                        </p>
+                        {tiktokCreatorInfo.creator_username && (
+                          <p className="text-xs text-gray-400">@{tiktokCreatorInfo.creator_username}</p>
+                        )}
+                      </div>
+                    ) : (
+                      <span className="text-gray-400 text-xs">账号信息获取失败</span>
+                    )}
+                  </div>
+
+                  {/* Privacy level — pill buttons */}
+                  <div>
+                    <p className="text-xs font-medium text-gray-600 mb-2">
+                      隐私设置 <span className="text-red-500">*</span>
+                    </p>
+                    <div className="flex flex-wrap gap-2">
+                      {(tiktokCreatorInfo?.privacy_level_options ?? [
+                        "PUBLIC_TO_EVERYONE",
+                        "MUTUAL_FOLLOW_FRIENDS",
+                        "FOLLOWER_OF_CREATOR",
+                        "SELF_ONLY",
+                      ]).map((opt) => {
+                        const label =
+                          opt === "PUBLIC_TO_EVERYONE" ? "所有人可见" :
+                          opt === "MUTUAL_FOLLOW_FRIENDS" ? "互相关注的好友" :
+                          opt === "FOLLOWER_OF_CREATOR" ? "我的粉丝" :
+                          opt === "SELF_ONLY" ? "仅自己可见" : opt;
+                        const active = tiktokPrivacyLevel === opt;
+                        return (
+                          <button
+                            key={opt}
+                            type="button"
+                            onClick={() => setTiktokPrivacyLevel(opt)}
+                            className={`px-3 py-1.5 rounded-full text-xs font-medium border transition-colors ${
+                              active
+                                ? "bg-blue-600 text-white border-blue-600"
+                                : "bg-white text-gray-600 border-gray-300 hover:border-blue-400 hover:text-blue-600"
+                            }`}
+                          >
+                            {label}
+                          </button>
+                        );
+                      })}
+                    </div>
+                  </div>
+
+                  {/* Interaction permissions */}
+                  <div>
+                    <p className="text-xs font-medium text-gray-600 mb-2">互动权限</p>
+                    <div className="flex flex-col gap-2">
+                      <label className={`flex items-center gap-2 ${tiktokCreatorInfo?.comment_disabled ? "opacity-40 cursor-not-allowed" : "cursor-pointer"}`}>
+                        <input
+                          type="checkbox"
+                          checked={tiktokAllowComment}
+                          disabled={tiktokCreatorInfo?.comment_disabled}
+                          onChange={(e) => setTiktokAllowComment(e.target.checked)}
+                          className="rounded border-gray-300"
+                        />
+                        <span className="text-gray-700">
+                          允许评论
+                          {tiktokCreatorInfo?.comment_disabled && <span className="text-gray-400 ml-1">（账号已关闭）</span>}
+                        </span>
+                      </label>
+                      <label className={`flex items-center gap-2 ${tiktokCreatorInfo?.duet_disabled ? "opacity-40 cursor-not-allowed" : "cursor-pointer"}`}>
+                        <input
+                          type="checkbox"
+                          checked={tiktokAllowDuet}
+                          disabled={tiktokCreatorInfo?.duet_disabled}
+                          onChange={(e) => setTiktokAllowDuet(e.target.checked)}
+                          className="rounded border-gray-300"
+                        />
+                        <span className="text-gray-700">
+                          允许合拍（Duet）
+                          {tiktokCreatorInfo?.duet_disabled && <span className="text-gray-400 ml-1">（账号已关闭）</span>}
+                        </span>
+                      </label>
+                      <label className={`flex items-center gap-2 ${tiktokCreatorInfo?.stitch_disabled ? "opacity-40 cursor-not-allowed" : "cursor-pointer"}`}>
+                        <input
+                          type="checkbox"
+                          checked={tiktokAllowStitch}
+                          disabled={tiktokCreatorInfo?.stitch_disabled}
+                          onChange={(e) => setTiktokAllowStitch(e.target.checked)}
+                          className="rounded border-gray-300"
+                        />
+                        <span className="text-gray-700">
+                          允许跟拍（Stitch）
+                          {tiktokCreatorInfo?.stitch_disabled && <span className="text-gray-400 ml-1">（账号已关闭）</span>}
+                        </span>
+                      </label>
+                    </div>
+                  </div>
+
+                  {/* Commercial content disclosure */}
+                  <div>
+                    <label className="flex items-center justify-between cursor-pointer">
+                      <div>
+                        <p className="text-xs font-medium text-gray-600">商业内容披露</p>
+                        <p className="text-xs text-gray-400 mt-0.5">是否包含品牌推广或赞助内容</p>
+                      </div>
+                      <button
+                        type="button"
+                        role="switch"
+                        aria-checked={tiktokCommercial}
+                        onClick={() => {
+                          setTiktokCommercial((v) => {
+                            if (v) { setTiktokBrandedContent(false); setTiktokYourBrand(false); }
+                            return !v;
+                          });
+                        }}
+                        className={`relative inline-flex h-5 w-9 shrink-0 rounded-full transition-colors ${
+                          tiktokCommercial ? "bg-blue-600" : "bg-gray-300"
+                        }`}
+                      >
+                        <span
+                          className={`inline-block h-4 w-4 mt-0.5 rounded-full bg-white shadow transition-transform ${
+                            tiktokCommercial ? "translate-x-4.5" : "translate-x-0.5"
+                          }`}
+                        />
+                      </button>
+                    </label>
+                    {tiktokCommercial && (
+                      <div className="mt-2 space-y-2 pl-1">
+                        <label className="flex items-center gap-2 cursor-pointer">
+                          <input
+                            type="checkbox"
+                            checked={tiktokYourBrand}
+                            onChange={(e) => setTiktokYourBrand(e.target.checked)}
+                            className="rounded border-gray-300"
+                          />
+                          <span className="text-gray-700 text-xs">你的品牌（Your Brand）— 推广自己的产品或服务</span>
+                        </label>
+                        <label className="flex items-center gap-2 cursor-pointer">
+                          <input
+                            type="checkbox"
+                            checked={tiktokBrandedContent}
+                            onChange={(e) => setTiktokBrandedContent(e.target.checked)}
+                            className="rounded border-gray-300"
+                          />
+                          <span className="text-gray-700 text-xs">品牌内容（Branded Content）— 推广第三方品牌</span>
+                        </label>
+                      </div>
+                    )}
+                  </div>
+
+                  {/* Policy agreement */}
+                  <p className="text-xs text-gray-400 border-t border-gray-200 pt-3 leading-relaxed">
+                    点击「发布」即表示你同意 TikTok 的{" "}
+                    <a
+                      href="https://www.tiktok.com/legal/page/global/music-usage-confirmation/en"
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="text-blue-500 hover:underline"
+                    >
+                      Music Usage Confirmation
+                    </a>
+                    {tiktokBrandedContent && (
+                      <>
+                        {" "}及{" "}
+                        <a
+                          href="https://www.tiktok.com/legal/page/global/bc-policy/en"
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="text-blue-500 hover:underline"
+                        >
+                          Branded Content Policy
+                        </a>
+                      </>
+                    )}
+                    。内容提交后可能需要几分钟才会出现在你的主页。
+                  </p>
+                </div>
+              )}
             </div>
           )}
 

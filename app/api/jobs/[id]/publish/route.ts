@@ -3,8 +3,18 @@
  * Upload processed video to one or more platforms.
  * Job must be in REVIEW_PENDING status.
  *
- * Body: { targets?: ("YOUTUBE"|"TIKTOK")[] }
- *   - Default: ["YOUTUBE"] for backward compatibility
+ * Body: {
+ *   targets?: ("YOUTUBE"|"TIKTOK")[],
+ *   tiktokOptions?: {
+ *     privacyLevel: string,
+ *     allowComment: boolean,
+ *     allowDuet: boolean,
+ *     allowStitch: boolean,
+ *     brandedContent: boolean,
+ *     yourBrand: boolean,
+ *   }
+ * }
+ *   - Default targets: ["YOUTUBE"] for backward compatibility
  *   - Each target creates/updates a Publication record
  */
 
@@ -26,6 +36,14 @@ export async function POST(
   const { id } = await params;
   const body = (await req.json().catch(() => ({}))) as {
     targets?: string[];
+    tiktokOptions?: {
+      privacyLevel?: string;
+      allowComment?: boolean;
+      allowDuet?: boolean;
+      allowStitch?: boolean;
+      brandedContent?: boolean;
+      yourBrand?: boolean;
+    };
   };
 
   const targets = (body.targets ?? ["YOUTUBE"]).filter((t) =>
@@ -142,10 +160,20 @@ export async function POST(
     // ── TikTok ────────────────────────────────────────────────
     if (targets.includes("TIKTOK")) {
       try {
+        // Sandbox / unaudited apps must use MEDIA_UPLOAD (draft) mode — DIRECT_POST
+        // requires TikTok app review approval.
+        const isSandbox = process.env.TIKTOK_USE_SANDBOX === "true";
+        const tiktokOpts = body.tiktokOptions ?? {};
         const ttResult = await uploadToTikTok({
           videoFilePath: videoPath,
           title: job.translatedTitle || job.title,
-          privacyLevel: "SELF_ONLY", // Private first — review before going public
+          privacyLevel: tiktokOpts.privacyLevel ?? "SELF_ONLY",
+          allowComment: tiktokOpts.allowComment ?? false,
+          allowDuet: tiktokOpts.allowDuet ?? false,
+          allowStitch: tiktokOpts.allowStitch ?? false,
+          brandedContent: tiktokOpts.brandedContent ?? false,
+          yourBrand: tiktokOpts.yourBrand ?? false,
+          directPost: !isSandbox, // sandbox → MEDIA_UPLOAD draft; production → DIRECT_POST
         });
 
         await prisma.publication.update({
