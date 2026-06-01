@@ -6,6 +6,7 @@
  * prints YOUTUBE_REFRESH_TOKEN for .env
  */
 
+import "dotenv/config";
 import { google } from "googleapis";
 import http from "http";
 import { execSync } from "child_process";
