@@ -95,6 +95,17 @@ function parseLikeCount(s: string | undefined): number {
   return parseInt(s, 10) || 0;
 }
 
+function getImageUrls(card: XhsNoteCard): string[] {
+  if (!card.image_list?.length) return [];
+  return card.image_list.map((img) => {
+    const fromInfoList =
+      img.info_list?.find((i) => i.image_scene === "WB_DFT")?.url ??
+      img.info_list?.[0]?.url;
+    const raw = fromInfoList ?? "";
+    return raw.startsWith("//") ? `https:${raw}` : raw;
+  }).filter(Boolean);
+}
+
 function getCoverUrl(card: XhsNoteCard): string {
   // Try multiple cover URL sources — XHS format varies
   const cover = card.cover as Record<string, unknown> | undefined;
@@ -431,6 +442,7 @@ export async function searchXiaohongshu(
         authorName: card.user?.nickname ?? "",
         authorId: card.user?.user_id ?? "",
         publishedAt: card.time ? new Date(card.time * 1000).toISOString() : new Date().toISOString(),
+        imageUrls: isVideo ? [] : getImageUrls(card),
       };
     });
 }

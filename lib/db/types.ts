@@ -35,4 +35,6 @@ export interface ScraperResult {
   authorName: string;
   authorId: string;
   publishedAt: string;
+  /** IMAGE_NOTE only — image URLs extracted at scrape time */
+  imageUrls?: string[];
 }

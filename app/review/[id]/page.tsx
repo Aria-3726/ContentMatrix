@@ -39,6 +39,7 @@ interface Job {
   duration: number;
   localVideoPath: string;
   processedVideoPath: string;
+  imageUrls: string;
 }
 
 function formatSRT(segments: SubtitleSegment[]): string {
@@ -66,6 +67,7 @@ export default function ReviewPage({
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [publishing, setPublishing] = useState(false);
+  const [refreshingImages, setRefreshingImages] = useState(false);
   const [publishTargets, setPublishTargets] = useState<Record<string, boolean>>({
     YOUTUBE: true,
     TIKTOK: false,
@@ -169,6 +171,24 @@ export default function ReviewPage({
       showToast("已保存");
     } finally {
       setSaving(false);
+    }
+  };
+
+  const handleRefreshImages = async () => {
+    if (!job) return;
+    setRefreshingImages(true);
+    try {
+      const res = await fetch(`/api/jobs/${id}/refresh-images`, { method: "POST" });
+      const data = (await res.json()) as { message?: string; imageCount?: number; error?: string };
+      if (!res.ok) throw new Error(data.error ?? "获取图片失败");
+      showToast(data.message ?? `已获取 ${data.imageCount} 张图片`);
+      // Reload job to reflect new imageUrls
+      const jobRes = await fetch(`/api/jobs/${id}`);
+      if (jobRes.ok) setJob(await jobRes.json());
+    } catch (err) {
+      showToast(err instanceof Error ? err.message : "获取图片失败");
+    } finally {
+      setRefreshingImages(false);
     }
   };
 
@@ -764,6 +784,22 @@ export default function ReviewPage({
             </div>
           )}
 
+          {/* IMAGE_NOTE with missing imageUrls: show repair button */}
+          {job.sourceType === "IMAGE_NOTE" &&
+            JSON.parse(job.imageUrls || "[]").length === 0 && (
+              <div className="mb-3 p-3 bg-yellow-50 border border-yellow-200 rounded-xl text-sm text-yellow-800">
+                <p className="font-medium mb-1">⚠️ 未找到图片 URL</p>
+                <p className="text-xs mb-2">此笔记需要重新获取图片，才能发布到 TikTok。</p>
+                <button
+                  onClick={handleRefreshImages}
+                  disabled={refreshingImages}
+                  className="px-3 py-1.5 bg-yellow-600 hover:bg-yellow-700 text-white rounded-lg text-xs font-medium disabled:opacity-50 transition-colors"
+                >
+                  {refreshingImages ? "获取中…" : "获取图片 URL"}
+                </button>
+              </div>
+            )}
+
           <div className="flex gap-3">
             <button
               onClick={handleSave}
@@ -775,7 +811,7 @@ export default function ReviewPage({
             {job.status === "REVIEW_PENDING" && (
               <button
                 onClick={handlePublish}
-                disabled={publishing}
+                disabled={publishing || (job.sourceType === "IMAGE_NOTE" && JSON.parse(job.imageUrls || "[]").length === 0)}
                 className="flex-1 py-2.5 bg-red-600 hover:bg-red-700 text-white rounded-xl text-sm font-medium disabled:opacity-50 transition-colors"
               >
                 {publishing ? "上传中…" : "发布"}

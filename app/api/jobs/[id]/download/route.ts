@@ -38,8 +38,11 @@ export async function POST(
       let filePath: string;
 
       if (job.sourceType === "IMAGE_NOTE") {
-        // IMAGE_NOTE: fetch image URLs and store for carousel publishing (no video conversion)
-        const imageUrls = await fetchNoteImageUrls(job.sourceUrl, job.platform);
+        // IMAGE_NOTE: use already-scraped image URLs if available, else fetch from note page
+        const existingUrls: string[] = JSON.parse(job.imageUrls || "[]");
+        const imageUrls = existingUrls.length > 0
+          ? existingUrls
+          : await fetchNoteImageUrls(job.sourceUrl, job.platform);
         await prisma.job.update({
           where: { id },
           data: {

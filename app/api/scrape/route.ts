@@ -72,6 +72,8 @@ export async function POST(req: NextRequest) {
           authorId: r.authorId,
           publishedAt: r.publishedAt,
           status: "DISCOVERED",
+          // IMAGE_NOTE: persist image URLs from search result so download step can skip re-fetch
+          ...(r.imageUrls?.length ? { imageUrls: JSON.stringify(r.imageUrls) } : {}),
         },
       });
       created.push(r.sourceId);

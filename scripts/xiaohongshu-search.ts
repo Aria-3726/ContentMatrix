@@ -56,6 +56,10 @@ interface XhsNoteCard {
   user?: { user_id?: string; nickname?: string };
   interact_info?: { liked_count?: string };
   cover?: Record<string, unknown>;
+  image_list?: Array<{
+    info_list?: Array<{ image_scene?: string; url?: string }>;
+    url_default?: string;
+  }>;
   video?: { duration?: number };
   time?: number;
 }
@@ -83,6 +87,17 @@ function getCoverUrl(cover: Record<string, unknown> | undefined): string {
   const infoList = (cover.info_list as { url?: string }[]) ?? [];
   const url = infoList[0]?.url ?? "";
   return url.startsWith("//") ? `https:${url}` : url;
+}
+
+function getImageUrls(card: XhsNoteCard): string[] {
+  if (!card.image_list?.length) return [];
+  return card.image_list.map((img) => {
+    const fromInfoList =
+      img.info_list?.find((i) => i.image_scene === "WB_DFT")?.url ??
+      img.info_list?.[0]?.url;
+    const raw = fromInfoList ?? img.url_default ?? "";
+    return raw.startsWith("//") ? `https:${raw}` : raw;
+  }).filter(Boolean);
 }
 
 // ── 搜索核心 ──────────────────────────────────────────────────
@@ -202,6 +217,7 @@ async function runSearch(opts: XhsBrowserSearchOptions): Promise<ScraperResult[]
           publishedAt: card.time
             ? new Date(card.time * 1000).toISOString()
             : new Date().toISOString(),
+          imageUrls: isVideo ? [] : getImageUrls(card),
         } satisfies ScraperResult;
       });
   } finally {
