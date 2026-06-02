@@ -186,7 +186,8 @@ export default function ReviewPage({
       const jobRes = await fetch(`/api/jobs/${id}`);
       if (jobRes.ok) setJob(await jobRes.json());
     } catch (err) {
-      showToast(err instanceof Error ? err.message : "获取图片失败");
+      const msg = err instanceof Error ? err.message : "获取图片失败";
+      showToast(`❌ ${msg}`);
     } finally {
       setRefreshingImages(false);
     }
