@@ -21,7 +21,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/db/client";
 import { uploadToYouTube, generateSRT } from "@/lib/publisher/youtube";
-import { uploadToTikTok } from "@/lib/publisher/tiktok";
+import { uploadToTikTok, uploadPhotoToTikTok } from "@/lib/publisher/tiktok";
 import type { SubtitleSegment } from "@/lib/db/types";
 import path from "path";
 import fs from "fs";
@@ -67,12 +67,22 @@ export async function POST(
     );
   }
 
+  const isPhotoPost = job.sourceType === "IMAGE_NOTE";
   const videoPath = job.processedVideoPath || job.localVideoPath;
-  if (!videoPath) {
+  if (!isPhotoPost && !videoPath) {
     return NextResponse.json(
       { error: "No video file available for publishing" },
       { status: 409 }
     );
+  }
+  if (isPhotoPost) {
+    const imageUrls: string[] = JSON.parse(job.imageUrls || "[]");
+    if (imageUrls.length === 0) {
+      return NextResponse.json(
+        { error: "No image URLs found for this IMAGE_NOTE job" },
+        { status: 409 }
+      );
+    }
   }
 
   // Mark job as publishing
@@ -114,6 +124,14 @@ export async function POST(
 
     // ── YouTube ───────────────────────────────────────────────
     if (targets.includes("YOUTUBE")) {
+      // IMAGE_NOTE (carousel) cannot be published to YouTube
+      if (isPhotoPost) {
+        await prisma.publication.update({
+          where: { jobId_platform: { jobId: id, platform: "YOUTUBE" } },
+          data: { status: "FAILED", errorMsg: "IMAGE_NOTE (carousel) 不支持发布到 YouTube，请选择 TikTok" },
+        });
+        results.YOUTUBE = { success: false, error: "IMAGE_NOTE cannot be published to YouTube" };
+      } else
       try {
         const ytResult = await uploadToYouTube({
           videoFilePath: videoPath,
@@ -160,21 +178,39 @@ export async function POST(
     // ── TikTok ────────────────────────────────────────────────
     if (targets.includes("TIKTOK")) {
       try {
-        // Sandbox / unaudited apps must use MEDIA_UPLOAD (draft) mode — DIRECT_POST
-        // requires TikTok app review approval.
         const isSandbox = process.env.TIKTOK_USE_SANDBOX === "true";
         const tiktokOpts = body.tiktokOptions ?? {};
-        const ttResult = await uploadToTikTok({
-          videoFilePath: videoPath,
-          title: job.translatedTitle || job.title,
-          privacyLevel: tiktokOpts.privacyLevel ?? "SELF_ONLY",
+        const sharedTitle = job.translatedTitle || job.title;
+        const sharedPrivacy = tiktokOpts.privacyLevel ?? "SELF_ONLY";
+        const directPost = !isSandbox;
+
+        let ttResult: { publishId: string };
+
+        if (isPhotoPost) {
+          // IMAGE_NOTE → TikTok Photo Mode (carousel)
+          const imageUrls: string[] = JSON.parse(job.imageUrls || "[]");
+          ttResult = await uploadPhotoToTikTok({
+            photoUrls: imageUrls,
+            title: sharedTitle,
+            description: job.translatedDesc || job.description,
+            tags,
+            privacyLevel: sharedPrivacy,
+            directPost,
+          });
+        } else {
+          // VIDEO → standard video upload
+          ttResult = await uploadToTikTok({
+          videoFilePath: videoPath!,
+          title: sharedTitle,
+          privacyLevel: sharedPrivacy,
           allowComment: tiktokOpts.allowComment ?? false,
           allowDuet: tiktokOpts.allowDuet ?? false,
           allowStitch: tiktokOpts.allowStitch ?? false,
           brandedContent: tiktokOpts.brandedContent ?? false,
           yourBrand: tiktokOpts.yourBrand ?? false,
-          directPost: !isSandbox, // sandbox → MEDIA_UPLOAD draft; production → DIRECT_POST
-        });
+          directPost,
+          });
+        }
 
         await prisma.publication.update({
           where: { jobId_platform: { jobId: id, platform: "TIKTOK" } },

@@ -39,6 +39,15 @@ export async function POST(
 
   (async () => {
     try {
+      // IMAGE_NOTE has no audio — skip extraction and store empty transcript
+      if (job.sourceType === "IMAGE_NOTE") {
+        await prisma.job.update({
+          where: { id },
+          data: { status: "TRANSCRIBED", transcript: "", subtitles: "[]" },
+        });
+        return;
+      }
+
       const audioPath = await extractAudio(job.localVideoPath, id);
       const result = await transcribeFile(audioPath, "zh");
 

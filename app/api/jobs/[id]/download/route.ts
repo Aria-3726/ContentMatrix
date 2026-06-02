@@ -2,14 +2,13 @@
  * POST /api/jobs/:id/download
  * Trigger download for a job.
  *   - VIDEO: uses yt-dlp to download from source URL
- *   - IMAGE_NOTE: downloads images and converts to video slideshow
+ *   - IMAGE_NOTE: fetches image URLs from note page and stores them for carousel publishing
  * Updates job status: DOWNLOADING → DOWNLOADED
  */
 
 import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/db/client";
 import { downloadVideo } from "@/lib/processor/downloader";
-import { imagesToVideo } from "@/lib/processor/image-to-video";
 
 export async function POST(
   _req: NextRequest,
@@ -39,20 +38,18 @@ export async function POST(
       let filePath: string;
 
       if (job.sourceType === "IMAGE_NOTE") {
-        // IMAGE_NOTE: fetch note detail to get image URLs, convert to slideshow
+        // IMAGE_NOTE: fetch image URLs and store for carousel publishing (no video conversion)
         const imageUrls = await fetchNoteImageUrls(job.sourceUrl, job.platform);
-        filePath = await imagesToVideo({
-          imageUrls,
-          jobId: id,
-          referer:
-            job.platform === "XIAOHONGSHU"
-              ? "https://www.xiaohongshu.com/"
-              : undefined,
-          cookie:
-            job.platform === "XIAOHONGSHU"
-              ? process.env.XIAOHONGSHU_COOKIE
-              : undefined,
+        await prisma.job.update({
+          where: { id },
+          data: {
+            status: "DOWNLOADED",
+            imageUrls: JSON.stringify(imageUrls),
+            // Estimate duration as 3s per image for any downstream use
+            ...(job.duration === 0 ? { duration: imageUrls.length * 3 } : {}),
+          },
         });
+        return; // early return — no filePath needed
       } else {
         // VIDEO: standard yt-dlp download
         const result = await downloadVideo(job.sourceUrl, id, job.platform);
@@ -64,10 +61,6 @@ export async function POST(
         data: {
           status: "DOWNLOADED",
           localVideoPath: filePath,
-          // Set duration for image notes (4s per image × number of images)
-          ...(job.sourceType === "IMAGE_NOTE" && job.duration === 0
-            ? { duration: 20 } // Approximate default
-            : {}),
         },
       });
     } catch (err) {
@@ -83,7 +76,7 @@ export async function POST(
     success: true,
     message:
       job.sourceType === "IMAGE_NOTE"
-        ? "Image slideshow creation started"
+        ? "Image URL extraction started"
         : "Download started",
   });
 }

@@ -20,6 +20,22 @@ const CHUNK_SIZE = 10 * 1024 * 1024; // 10 MB per chunk
 
 // ── Types ────────────────────────────────────────────────────
 
+export interface TikTokPhotoOptions {
+  /** Public image URLs TikTok will pull from (max 35) */
+  photoUrls: string[];
+  title: string;
+  description?: string;
+  tags?: string[];
+  /** "PUBLIC_TO_EVERYONE" | "FOLLOWER_OF_CREATOR" | "MUTUAL_FOLLOW_FRIENDS" | "SELF_ONLY" */
+  privacyLevel?: string;
+  /** Index of the cover photo (0-based). Default 0. */
+  coverIndex?: number;
+  /** Add auto background music. Default false. */
+  autoAddMusic?: boolean;
+  /** If true, publishes directly. Default true. */
+  directPost?: boolean;
+}
+
 export interface TikTokUploadOptions {
   videoFilePath: string;
   title: string;
@@ -221,6 +237,79 @@ async function pollPublishStatus(
 }
 
 // ── Main export ──────────────────────────────────────────────
+
+/**
+ * Publish an image carousel (Photo Mode) to TikTok.
+ * Uses /v2/post/publish/content/init/ with media_type=PHOTO and PULL_FROM_URL.
+ *
+ * Image URLs must be publicly accessible (TikTok fetches them directly).
+ */
+export async function uploadPhotoToTikTok(
+  opts: TikTokPhotoOptions
+): Promise<TikTokUploadResult> {
+  if (!opts.photoUrls.length) {
+    throw new Error("photoUrls must not be empty");
+  }
+  if (opts.photoUrls.length > 35) {
+    throw new Error("TikTok Photo Mode supports at most 35 images");
+  }
+
+  const token = await getAccessToken();
+
+  let privacyLevel = opts.privacyLevel ?? "SELF_ONLY";
+  try {
+    const creatorInfo = await apiPost<{ privacy_level_options?: string[] }>(
+      "/post/publish/creator_info/query/",
+      {},
+      token
+    );
+    if (
+      creatorInfo.privacy_level_options?.length &&
+      !creatorInfo.privacy_level_options.includes(privacyLevel)
+    ) {
+      privacyLevel = creatorInfo.privacy_level_options[0];
+      console.log(`[tiktok] photo: privacy_level adjusted to: ${privacyLevel}`);
+    }
+  } catch (err) {
+    console.warn("[tiktok] photo: creator_info query failed:", err instanceof Error ? err.message : err);
+  }
+
+  // Build caption
+  let caption = opts.title;
+  if (opts.description) caption += "\n\n" + opts.description;
+  if (opts.tags?.length) caption += " " + opts.tags.map((t) => `#${t}`).join(" ");
+  caption = caption.slice(0, 2200);
+
+  const directPost = opts.directPost !== false;
+
+  console.log(`[tiktok] Uploading photo carousel (${opts.photoUrls.length} images)...`);
+
+  const initResp = await apiPost<{ publish_id: string }>(
+    "/post/publish/content/init/",
+    {
+      media_type: "PHOTO",
+      post_info: {
+        title: caption,
+        privacy_level: privacyLevel,
+        disable_comment: false,
+        auto_add_music: opts.autoAddMusic ?? false,
+      },
+      source_info: {
+        source: "PULL_FROM_URL",
+        photo_images: opts.photoUrls,
+        photo_cover_index: opts.coverIndex ?? 0,
+      },
+      ...(directPost ? { post_mode: "DIRECT_POST" } : {}),
+    },
+    token
+  );
+
+  const { publish_id: publishId } = initResp;
+  console.log(`[tiktok] photo publish_id: ${publishId}`);
+
+  await pollPublishStatus(publishId, token);
+  return { publishId };
+}
 
 /**
  * Upload a video to TikTok using the Content Posting API v2.

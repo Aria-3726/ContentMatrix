@@ -38,6 +38,7 @@ model Job {
   // Processing artifacts
   localVideoPath     String @default("")
   processedVideoPath String @default("")
+  imageUrls          String @default("[]") // JSON string[] — for IMAGE_NOTE carousel
 
   // Transcription (Chinese)
   transcript String @default("")
