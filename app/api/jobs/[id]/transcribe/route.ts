@@ -18,9 +18,17 @@ export async function POST(
   const job = await prisma.job.findUnique({ where: { id } });
   if (!job) return NextResponse.json({ error: "not found" }, { status: 404 });
 
-  if (job.status !== "DOWNLOADED") {
+  if (!["DOWNLOADED", "FAILED"].includes(job.status)) {
     return NextResponse.json(
       { error: `Must be DOWNLOADED to transcribe. Current: ${job.status}` },
+      { status: 409 }
+    );
+  }
+
+  // For FAILED VIDEO jobs, localVideoPath must still be set (re-download if not)
+  if (job.sourceType !== "IMAGE_NOTE" && !job.localVideoPath) {
+    return NextResponse.json(
+      { error: "No local video file — please re-download first" },
       { status: 409 }
     );
   }
