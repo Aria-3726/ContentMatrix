@@ -1,12 +1,12 @@
 /**
  * 小红书笔记图片 URL 提取子进程
  *
- * 由 /api/jobs/:id/refresh-images 通过 execFile 调用。
  * argv[2] = 笔记 URL (含 xsec_token)
  * stdout  = { ok: true, imageUrls: string[] } | { ok: false, error: string }
  *
- * 原理：用持久化浏览器会话打开笔记页，页面加载完成后直接从
- * window.__INITIAL_STATE__ 里提取图片列表，无需等待特定 XHR。
+ * 原理：Puppeteer 打开笔记页，等待渲染完成后取 page.content()，
+ * 在 Node.js 端解析 window.__INITIAL_STATE__ 提取图片列表。
+ * 避免在 page.evaluate() 里定义函数（esbuild __name 兼容问题）。
  */
 
 import puppeteerExtra from "puppeteer-extra";
@@ -33,6 +33,70 @@ function findChromePath(): string | undefined {
   ].find((p) => fs.existsSync(p));
 }
 
+/** 从 __INITIAL_STATE__ 字符串解析图片 URL 列表 */
+function parseImageUrlsFromState(stateStr: string): string[] {
+  const cleaned = stateStr.replace(/\bundefined\b/g, "null");
+  let state: unknown;
+  try {
+    state = JSON.parse(cleaned);
+  } catch {
+    return [];
+  }
+
+  const urls: string[] = [];
+
+  function normalizeUrl(raw: string): string {
+    if (!raw) return "";
+    return raw.startsWith("//") ? `https:${raw}` : raw;
+  }
+
+  function extractFromImg(img: Record<string, unknown>): string {
+    // 支持驼峰（infoList/imageScene/urlDefault）和下划线（info_list/image_scene/url_default）
+    const infoList = (
+      (img.infoList ?? img.info_list) as Array<{ imageScene?: string; image_scene?: string; url?: string }>
+    ) ?? [];
+    const best =
+      infoList.find((i) => (i.imageScene ?? i.image_scene) === "WB_DFT")?.url ??
+      infoList[0]?.url ??
+      (img.urlDefault as string) ??
+      (img.url_default as string) ??
+      (img.urlPre as string) ??
+      (img.url_pre as string) ??
+      "";
+    return normalizeUrl(best);
+  }
+
+  function isImageItem(item: unknown): item is Record<string, unknown> {
+    if (!item || typeof item !== "object") return false;
+    const o = item as Record<string, unknown>;
+    return (
+      "urlDefault" in o || "url_default" in o ||
+      "infoList" in o || "info_list" in o
+    );
+  }
+
+  function walk(obj: unknown, depth: number): void {
+    if (depth > 10 || !obj || typeof obj !== "object") return;
+    if (Array.isArray(obj)) {
+      if (obj.length > 0 && obj.every(isImageItem)) {
+        for (const img of obj as Record<string, unknown>[]) {
+          const u = extractFromImg(img);
+          if (u) urls.push(u);
+        }
+        return;
+      }
+      for (const item of obj) walk(item, depth + 1);
+    } else {
+      for (const val of Object.values(obj as Record<string, unknown>)) {
+        walk(val, depth + 1);
+      }
+    }
+  }
+
+  walk(state, 0);
+  return urls;
+}
+
 async function fetchNoteImages(noteUrl: string): Promise<string[]> {
   // 清理残留锁
   try { execFileSync("pkill", ["-f", XHS_BROWSER_DATA_DIR], { stdio: "ignore" }); } catch { /**/ }
@@ -55,79 +119,51 @@ async function fetchNoteImages(noteUrl: string): Promise<string[]> {
     const page = await browser.newPage();
     await page.setUserAgent(USER_AGENT);
 
-    process.stderr.write(`[xhs-images] 导航: ${noteUrl}\n`);
-    await page.goto(noteUrl, { waitUntil: "networkidle2", timeout: 30_000 });
-
-    // 等待页面完全渲染（React hydration）
-    await sleep(2500);
-
-    // 从 __INITIAL_STATE__ 提取图片列表
-    const imageUrls = await page.evaluate(() => {
-      const state = (window as unknown as Record<string, unknown>).__INITIAL_STATE__;
-      if (!state || typeof state !== "object") return [] as string[];
-
-      const urls: string[] = [];
-
-      function normalizeUrl(raw: string): string {
-        if (!raw) return "";
-        return raw.startsWith("//") ? `https:${raw}` : raw;
-      }
-
-      function extractFromImageItem(img: Record<string, unknown>): string {
-        const infoList = (img.info_list as Array<{ image_scene?: string; url?: string }>) ?? [];
-        const best =
-          infoList.find((i) => i.image_scene === "WB_DFT")?.url ??
-          infoList[0]?.url ??
-          (img.url_default as string) ??
-          (img.url as string) ??
-          "";
-        return best;
-      }
-
-      function walk(obj: unknown, depth: number): void {
-        if (depth > 10 || !obj || typeof obj !== "object") return;
-        if (Array.isArray(obj)) {
-          // 判断是否为 image_list（每项都有 url_default 或 info_list）
-          const looksLikeImageList =
-            obj.length > 0 &&
-            obj.every(
-              (item) =>
-                item &&
-                typeof item === "object" &&
-                ("url_default" in item || "info_list" in item)
-            );
-          if (looksLikeImageList) {
-            for (const img of obj as Record<string, unknown>[]) {
-              const u = normalizeUrl(extractFromImageItem(img));
-              if (u) urls.push(u);
-            }
-            return;
+    // 同时拦截 XHR（部分笔记图片在 XHR 里而非 SSR state）
+    const xhrImageUrls: string[] = [];
+    page.on("response", async (response) => {
+      const url = response.url();
+      if (url.includes("/api/sns/web/v1/feed") || url.includes("/api/sns/web/v1/note/")) {
+        try {
+          const json = (await response.json()) as Record<string, unknown>;
+          const found = parseImageUrlsFromState(JSON.stringify(json));
+          if (found.length > 0) {
+            xhrImageUrls.push(...found);
+            process.stderr.write(`[xhs-images] XHR 捕获 ${found.length} 张图片\n`);
           }
-          for (const item of obj) walk(item, depth + 1);
-        } else {
-          for (const [key, val] of Object.entries(obj as Record<string, unknown>)) {
-            // image_list 是我们要找的键名
-            if (key === "imageList" || key === "image_list") {
-              walk(val, depth + 1);
-            } else {
-              walk(val, depth + 1);
-            }
-          }
-        }
+        } catch { /**/ }
       }
-
-      walk(state, 0);
-      return urls;
     });
 
-    process.stderr.write(`[xhs-images] 从 __INITIAL_STATE__ 提取到 ${imageUrls.length} 张图片\n`);
+    process.stderr.write(`[xhs-images] 导航: ${noteUrl}\n`);
+    await page.goto(noteUrl, { waitUntil: "domcontentloaded", timeout: 30_000 });
+    await sleep(3500); // 等待 React hydration 和 XHR 响应
+
+    // 优先用 XHR 结果（更完整），否则从 __INITIAL_STATE__ 提取
+    if (xhrImageUrls.length > 0) {
+      process.stderr.write(`[xhs-images] 使用 XHR 结果：${xhrImageUrls.length} 张\n`);
+      return xhrImageUrls;
+    }
+
+    // 从页面 HTML 解析 __INITIAL_STATE__
+    const html = await page.content();
+    const marker = "window.__INITIAL_STATE__=";
+    const idx = html.indexOf(marker);
+
+    if (idx === -1) {
+      process.stderr.write(`[xhs-images] 未找到 __INITIAL_STATE__，页面长度: ${html.length}\n`);
+      throw new Error("笔记页面未找到状态数据（可能需要重新登录）");
+    }
+
+    const start = idx + marker.length;
+    const scriptEnd = html.indexOf("</script>", start);
+    const stateStr = html.slice(start, scriptEnd === -1 ? start + 200_000 : scriptEnd).replace(/;\s*$/, "").trim();
+
+    const imageUrls = parseImageUrlsFromState(stateStr);
+    process.stderr.write(`[xhs-images] __INITIAL_STATE__ 提取到 ${imageUrls.length} 张图片\n`);
 
     if (imageUrls.length === 0) {
-      // 保存页面 HTML 供调试
-      const html = await page.content();
-      const hasState = html.includes("__INITIAL_STATE__");
-      process.stderr.write(`[xhs-images] __INITIAL_STATE__ 存在: ${hasState}，页面长度: ${html.length}\n`);
-      throw new Error("笔记页面未找到图片（可能需要重新登录）");
+      throw new Error("笔记中未找到图片（笔记可能已删除或需要重新登录）");
     }
 
     return imageUrls;
