@@ -42,12 +42,13 @@ export async function POST(
             PATH: `/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:${process.env.PATH ?? ""}`,
           },
         },
-        (err, out, stderr) => {
-          if (err) {
-            const msg = stderr?.trim() || err.message;
-            reject(new Error(msg.split("\n")[0]));
-          } else {
+        (err, out, _stderr) => {
+          // Subprocess writes { ok, ... } JSON to stdout even on failure.
+          // Always resolve with stdout; let the JSON parser surface the error.
+          if (out?.trim()) {
             resolve(out);
+          } else {
+            reject(new Error(err?.message ?? "子进程无输出"));
           }
         }
       );
